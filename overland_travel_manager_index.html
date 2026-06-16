@@ -1,0 +1,1536 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Overland Travel Manager — Spieltisch-Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              'bg-primary': '#0f1724',
+              'bg-secondary': '#071022',
+              'card': '#0b1220',
+              'muted': '#9aa6b2',
+              'accent': '#7dd3fc',
+              'good': '#34d399',
+              'bad': '#fb7185',
+              'glass': 'rgba(255, 255, 255, 0.03)',
+              'border-color': 'rgba(255, 255, 255, 0.04)',
+              'input-bg': 'rgba(255, 255, 255, 0.08)'
+            }
+          }
+        }
+      }
+    </script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  </head>
+  <body class="bg-gradient-to-b from-bg-secondary to-[#07182a] text-[#e6eef6] font-sans antialiased">
+    <div id="root"></div>
+    <script>
+const { useState, useEffect, useMemo, useRef } = React;
+const { createRoot } = ReactDOM;
+// ==========================================
+// CONSTANTS
+// ==========================================
+const DEFAULTS = {
+    day: {
+        "Straße": { hostile: [1, 3], neutral: [4, 6], poi: [7, 8] },
+        "Wildnis": { hostile: [1, 5], neutral: [6, 8], poi: [9, 10] },
+        "Unbekannt": { hostile: [1, 5], neutral: [6, 8], poi: [9, 22] },
+        "Feindgebiet": { hostile: [1, 10], neutral: [11, 12], poi: [13, 15] },
+        "Gesucht": { hostile: [1, 12], neutral: [13, 14], poi: [15, 17] },
+        "Custom": { hostile: [0, 0], neutral: [0, 0], poi: [0, 0] }
+    },
+    night: {
+        "Straße": { basis: [1, 1], light: 1 },
+        "Wildnis": { basis: [1, 3], light: 1 },
+        "Unbekannt": { basis: [1, 3], light: 1 },
+        "Feindgebiet": { basis: [1, 6], light: 1 },
+        "Gesucht": { basis: [1, 10], light: 2 },
+        "Custom": { basis: [0, 0], light: 0 }
+    }
+};
+const TERRAIN_MAP = { road: 'Straße', wilderness: 'Wildnis', unknown: 'Unbekannt', enemy: 'Feindgebiet', wanted: 'Gesucht', custom: 'Custom' };
+const TERRAIN_OPTIONS = [
+    { value: 'road', label: 'Straße (zivilisiert)' },
+    { value: 'wilderness', label: 'Abseits der Straße (Wildnis)' },
+    { value: 'unknown', label: 'Unbekanntes Gebiet' },
+    { value: 'enemy', label: 'Feindgebiet' },
+    { value: 'wanted', label: 'Gesucht (hoher Fahndungsdruck)' },
+    { value: 'custom', label: 'Custom' }
+];
+const VISION_NAMES = { none: 'Kein Darkvision', darkvision: 'Darkvision', magic: 'Magisches Darkvision' };
+const CONSUMPTION_RATES = {
+    'Tiny': { food: 0.25, water: 0.25, feed: 0.06 }, 'Small': { food: 1, water: 1, feed: 0.25 },
+    'Medium': { food: 1, water: 1, feed: 0.25 }, 'Large': { food: 4, water: 4, feed: 1.0 },
+    'Huge': { food: 16, water: 16, feed: 4.0 }, 'Gargantuan': { food: 64, water: 64, feed: 16.0 }
+};
+const FEED_WEIGHT_LB = 10;
+
+const MAX_TRAVEL_HOURS = 8;
+const FORCED_MARCH_BASE_DC = 10;
+const PACE_EFFECTS = {
+    fast: 'Schnell: −5 Passive Perception, dafür ca. +33% Distanz.',
+    normal: 'Normal: keine Modifikatoren.',
+    slow: 'Langsam: +5 Passive Perception in dieser App und Stealth möglich.'
+};
+const getSpeedInMph = (pace, speedFeet) => {
+    const normalSpeed = Math.max(0, safeFloat(speedFeet)) / 10;
+    switch (pace) {
+        case 'fast': return Math.round(normalSpeed * 1.3333 * 10) / 10;
+        case 'slow': return Math.round(normalSpeed * 0.6666 * 10) / 10;
+        case 'normal':
+        default: return Math.round(normalSpeed * 10) / 10;
+    }
+};
+const fmt = (n, digits = 1) => {
+    const v = Number(n || 0);
+    return Number.isInteger(v) ? v.toString() : v.toFixed(digits);
+};
+const RESULT_STYLES = {
+    hostile: 'bg-red-500/15 border-red-500/40 text-red-400',
+    neutral: 'bg-amber-500/15 border-amber-500/40 text-amber-400',
+    poi: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400',
+    none: 'bg-white/5 border-border-color text-muted',
+    info: 'bg-glass border-border-color text-white'
+};
+// ==========================================
+// HELPERS
+// ==========================================
+const generateId = () => Math.random().toString(36).substr(2, 9);
+const rnd = (n) => Math.floor(Math.random() * n) + 1;
+const parseInts = (str) => str.split(/[,;\s]+/).map(x => parseInt(x, 10)).filter(x => !isNaN(x));
+const avg = (arr) => arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : 0;
+const safeFloat = (val) => { const n = parseFloat(val); return isNaN(n) ? 0 : n; };
+const moveItem = (arr, index, dir) => {
+    const newArr = [...arr];
+    const target = index + dir;
+    if (target < 0 || target >= newArr.length)
+        return newArr;
+    [newArr[index], newArr[target]] = [newArr[target], newArr[index]];
+    return newArr;
+};
+const MoveButtons = ({ index, length, onMove }) => (React.createElement("div", { className: "flex flex-col gap-0.5" },
+    React.createElement("button", { onClick: () => onMove(-1), disabled: index === 0, className: `text-[10px] leading-none px-1 rounded ${index === 0 ? 'text-border-color cursor-default' : 'text-muted hover:text-white'}` }, "\u25B2"),
+    React.createElement("button", { onClick: () => onMove(1), disabled: index === length - 1, className: `text-[10px] leading-none px-1 rounded ${index === length - 1 ? 'text-border-color cursor-default' : 'text-muted hover:text-white'}` }, "\u25BC")));
+const LIGHTING_OPTIONS = [
+    { value: 'bright', label: '☀️ Bright Light', short: 'Bright' },
+    { value: 'dim', label: '🌅 Dim Light', short: 'Dim' },
+    { value: 'darkness', label: '🌑 Darkness', short: 'Dunkel' }
+];
+const getVisionMod = (lighting, vision) => {
+    if (lighting === 'bright')
+        return { mod: 0, label: 'Bright Light (kein Malus)' };
+    if (lighting === 'dim') {
+        if (vision === 'none')
+            return { mod: -5, label: 'Dim Light, kein DV (−5)' };
+        return { mod: 0, label: vision === 'magic' ? 'Dim Light, Mag. DV (kein Malus)' : 'Dim Light, DV: dim→bright (kein Malus)' };
+    }
+    // darkness
+    if (vision === 'magic')
+        return { mod: 0, label: 'Darkness, Mag. DV: dark→bright (kein Malus)' };
+    if (vision === 'darkvision')
+        return { mod: -5, label: 'Darkness, DV: dark→dim (−5)' };
+    return { mod: -5, label: 'Darkness, kein DV (−5)' };
+};
+// ==========================================
+// SHARED COMPONENTS
+// ==========================================
+const Modal = ({ config, onClose }) => {
+    if (!config.isOpen)
+        return null;
+    return (React.createElement("div", { className: "fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" },
+        React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-md w-full p-6" },
+            React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, config.title),
+            React.createElement("div", { className: "text-muted mb-6 whitespace-pre-wrap text-sm leading-relaxed" }, config.message),
+            React.createElement("div", { className: "flex justify-end gap-3" },
+                config.type === 'confirm' && React.createElement("button", { onClick: onClose, className: "px-4 py-2 rounded-lg border border-border-color text-muted hover:bg-glass hover:text-white transition-colors" }, "Abbrechen"),
+                React.createElement("button", { onClick: () => { if (config.onConfirm)
+                        config.onConfirm(); onClose(); }, className: "px-4 py-2 rounded-lg bg-accent text-bg-secondary font-bold shadow-md hover:opacity-90 transition-opacity" }, config.type === 'confirm' ? 'Bestätigen' : 'OK')))));
+};
+const HighlightText = ({ text }) => {
+    const sp = /(\b(?:hostile|neutral|poi|gewinnen|verlieren|erkannt|verpasst|verhindert|überrascht|vermieden)\b)/gi;
+    const tp = /^(?:hostile|neutral|poi|gewinnen|verlieren|erkannt|verpasst|verhindert|überrascht|vermieden)$/i;
+    return text.split(sp).map((part, i) => tp.test(part) ? React.createElement("strong", { key: i, className: "text-accent" }, part) : part);
+};
+const LogCard = ({ log, result, resultType, onResetLog }) => (React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg flex flex-col" },
+    React.createElement("div", { className: "flex justify-between items-center mb-2" },
+        React.createElement("h3", { className: "text-xl font-bold" }, "Log & Ergebnisse"),
+        React.createElement("button", { onClick: onResetLog, className: "bg-transparent border border-border-color text-muted text-sm py-1 px-3 rounded-lg hover:bg-glass transition-colors" }, "Log leeren")),
+    React.createElement("div", { className: `p-3 mb-2 rounded-lg border font-semibold ${RESULT_STYLES[resultType] || RESULT_STYLES.info}` },
+        React.createElement(HighlightText, { text: result })),
+    React.createElement("div", { className: "flex-grow h-64 overflow-y-auto p-2 rounded-lg bg-gradient-to-b from-[rgba(255,255,255,0.01)] to-[rgba(255,255,255,0.02)] font-mono text-sm text-muted" }, log.map((entry, i) => React.createElement("p", { key: i, className: "whitespace-pre-wrap" }, entry)))));
+const TerrainSelect = ({ value, onChange }) => (React.createElement("div", null,
+    React.createElement("label", { className: "block text-sm text-muted mb-1" }, "Gel\u00E4nde / Situation"),
+    React.createElement("select", { value: value, onChange: e => onChange(e.target.value), className: "w-full p-2 rounded-lg border border-border-color bg-bg-secondary text-white" }, TERRAIN_OPTIONS.map(o => React.createElement("option", { key: o.value, value: o.value }, o.label)))));
+const LightingSelect = ({ value, onChange }) => (React.createElement("div", null,
+    React.createElement("label", { className: "block text-sm text-muted mb-1" }, "Lichtverh\u00E4ltnisse"),
+    React.createElement("select", { value: value, onChange: e => onChange(e.target.value), className: "w-full p-2 rounded-lg border border-border-color bg-bg-secondary text-white" }, LIGHTING_OPTIONS.map(o => React.createElement("option", { key: o.value, value: o.value }, o.label)))));
+const MatrixInput = ({ value, onChange, onReset }) => (React.createElement("div", { className: "flex items-center gap-1 justify-center" },
+    React.createElement("input", { type: "number", value: value, onChange: e => onChange(parseInt(e.target.value, 10) || 0), className: "w-14 p-1 text-center rounded-md border border-border-color bg-input-bg text-white" }),
+    React.createElement("button", { onClick: onReset, title: "Reset", className: "text-muted hover:text-accent transition-colors" },
+        React.createElement("svg", { xmlns: "http://www.w3.org/2000/svg", className: "h-4 w-4", fill: "none", viewBox: "0 0 24 24", stroke: "currentColor" },
+            React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M4 4v5h5M20 20v-5h-5M4 4l16 16" })))));
+const FlowPanel = ({ title, children }) => (React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg" },
+    React.createElement("h4", { className: "text-lg font-bold mb-4" }, title),
+    children));
+// ==========================================
+// DAY SETTINGS
+// ==========================================
+const DaySettingsCard = ({ settings, setSettings, partyMembers, setPartyMembers, onTravelRoll, onResetAll, triggerModal }) => {
+    const set = (k, v) => setSettings(prev => ({ ...prev, [k]: v }));
+    const addMember = () => setPartyMembers(prev => [...prev, { id: generateId(), name: '', pp: 10, vision: 'none' }]);
+    const updateMember = (id, field, value) => setPartyMembers(prev => prev.map(m => m.id === id ? { ...m, [field]: value } : m));
+    const removeMember = (id) => setPartyMembers(prev => prev.filter(m => m.id !== id));
+    const bestEffective = useMemo(() => {
+        if (!partyMembers.length)
+            return null;
+        const lighting = settings.travelLighting || 'bright';
+        const paceMod = settings.pace === 'fast' ? -5 : settings.pace === 'slow' ? 5 : 0;
+        let best = null;
+        partyMembers.forEach(m => {
+            const vm = getVisionMod(lighting, m.vision || 'none');
+            const eff = m.pp + vm.mod + paceMod;
+            if (!best || eff > best.eff)
+                best = { ...m, eff, visionLabel: vm.label, basePP: m.pp, visionMod: vm.mod, paceMod };
+        });
+        return best;
+    }, [partyMembers, settings.travelLighting, settings.pace]);
+    return (React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg" },
+        React.createElement("h3", { className: "text-xl font-bold mb-4" }, "Travel Encounter"),
+        React.createElement("div", { className: "grid grid-cols-1 md:grid-cols-3 gap-4" },
+            React.createElement(TerrainSelect, { value: settings.terrain, onChange: v => set('terrain', v) }),
+            React.createElement(LightingSelect, { value: settings.travelLighting || 'bright', onChange: v => set('travelLighting', v) }),
+            React.createElement("div", { className: "grid grid-cols-2 gap-4" },
+                React.createElement("div", null,
+                    React.createElement("label", { className: "block text-sm text-muted mb-1" }, "Tempo"),
+                    React.createElement("select", { value: settings.pace, onChange: e => set('pace', e.target.value), className: "w-full p-2 rounded-lg border border-border-color bg-bg-secondary text-white" },
+                        React.createElement("option", { value: "normal" }, "Normal"),
+                        React.createElement("option", { value: "fast" }, "Schnell (\u22125)"),
+                        React.createElement("option", { value: "slow" }, "Langsam (+5)"))),
+                React.createElement("div", null,
+                    React.createElement("label", { className: "block text-sm text-muted mb-1" }, "Fahrzeug?"),
+                    React.createElement("select", { value: settings.vehicle, onChange: e => set('vehicle', e.target.value), className: "w-full p-2 rounded-lg border border-border-color bg-bg-secondary text-white" },
+                        React.createElement("option", { value: "no" }, "Nein"),
+                        React.createElement("option", { value: "yes" }, "Ja"))))),
+        React.createElement("hr", { className: "border-border-color my-4" }),
+        React.createElement("div", { className: "flex justify-between items-center mb-3" },
+            React.createElement("h4", { className: "text-lg font-bold" }, "Gruppenmitglieder"),
+            React.createElement("button", { onClick: addMember, className: "text-xs bg-glass px-2 py-1 rounded border border-border-color hover:bg-input-bg transition-colors" }, "+ Mitglied")),
+        React.createElement("div", { className: "space-y-2 mb-3" },
+            partyMembers.map((m, idx) => {
+                const lighting = settings.travelLighting || 'bright';
+                const vm = getVisionMod(lighting, m.vision || 'none');
+                const paceMod = settings.pace === 'fast' ? -5 : settings.pace === 'slow' ? 5 : 0;
+                const eff = m.pp + vm.mod + paceMod;
+                const isBest = bestEffective && bestEffective.id === m.id;
+                return (React.createElement("div", { key: m.id, className: `grid grid-cols-[20px,1fr,160px,70px,50px,30px] gap-2 items-center p-2 rounded-lg ${isBest ? 'bg-accent/10 border border-accent/30' : 'bg-glass'}` },
+                    React.createElement(MoveButtons, { index: idx, length: partyMembers.length, onMove: d => setPartyMembers(prev => moveItem(prev, idx, d)) }),
+                    React.createElement("input", { className: "bg-transparent text-sm text-white outline-none", value: m.name, onChange: e => updateMember(m.id, 'name', e.target.value), placeholder: "Name" }),
+                    React.createElement("select", { value: m.vision || 'none', onChange: e => updateMember(m.id, 'vision', e.target.value), className: "bg-bg-secondary text-sm rounded p-1 border border-border-color text-white" }, Object.entries(VISION_NAMES).map(([k, n]) => React.createElement("option", { key: k, value: k }, n))),
+                    React.createElement("div", { className: "flex flex-col items-center" },
+                        React.createElement("label", { className: "text-[9px] text-muted leading-none mb-0.5" }, "Pass. Perc."),
+                        React.createElement("input", { type: "number", min: "1", max: "30", className: "w-full bg-input-bg rounded p-1 text-xs text-center text-white border border-border-color", value: m.pp, onChange: e => updateMember(m.id, 'pp', parseInt(e.target.value, 10) || 1) })),
+                    React.createElement("div", { className: "flex flex-col items-center" },
+                        React.createElement("label", { className: "text-[9px] text-muted leading-none mb-0.5" }, "Eff."),
+                        React.createElement("div", { className: `text-sm font-bold ${vm.mod + paceMod < 0 ? 'text-bad' : 'text-good'}` }, eff)),
+                    React.createElement("button", { onClick: () => triggerModal('confirm', 'Entfernen', `"${m.name || 'Unbenannt'}" wirklich entfernen?`, () => removeMember(m.id)), className: "text-muted hover:text-bad transition-colors" }, "\u00D7")));
+            }),
+            partyMembers.length === 0 && React.createElement("p", { className: "text-muted text-sm italic" }, "Keine Mitglieder \u2014 Passive Perception muss manuell eingegeben werden.")),
+        bestEffective && (React.createElement("div", { className: "text-sm text-muted mb-4 p-2 bg-glass rounded-lg" },
+            "H\u00F6chste eff. Passive Perception: ",
+            React.createElement("strong", { className: "text-accent" }, bestEffective.name || 'Unbenannt'),
+            " \u2014 Basis ",
+            bestEffective.basePP,
+            bestEffective.visionMod !== 0 && React.createElement("span", null,
+                " ",
+                bestEffective.visionMod > 0 ? '+' : '',
+                bestEffective.visionMod,
+                " Vision"),
+            bestEffective.paceMod !== 0 && React.createElement("span", null,
+                " ",
+                bestEffective.paceMod > 0 ? '+' : '',
+                bestEffective.paceMod,
+                " Tempo"),
+            ' ',
+            "= ",
+            React.createElement("strong", { className: "text-white" }, bestEffective.eff))),
+        React.createElement("div", { className: "flex gap-2" },
+            React.createElement("button", { onClick: onTravelRoll, className: "flex-1 bg-gradient-to-r from-accent to-sky-500 text-bg-secondary font-bold py-2 px-4 rounded-lg shadow-md hover:opacity-90 transition-opacity" }, "Travel Roll"),
+            React.createElement("button", { onClick: onResetAll, className: "bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg hover:bg-glass transition-colors" }, "Reset All"))));
+};
+// ==========================================
+// NIGHT SETTINGS
+// ==========================================
+const NightSettingsCard = ({ settings, setSettings, onRestRoll, triggerModal }) => {
+    const set = (k, v) => setSettings(prev => ({ ...prev, [k]: v }));
+    const handleWatchCountChange = (e) => {
+        const count = Math.max(1, Math.min(8, parseInt(e.target.value, 10) || 1));
+        if (count < settings.watches.length) {
+            const removed = settings.watches.slice(count);
+            const hasData = removed.some(w => w.name);
+            if (hasData) {
+                triggerModal('confirm', 'Wachen entfernen', `${removed.length} Wachschicht(en) werden entfernt (${removed.map(w => w.name || 'Unbenannt').join(', ')}). Fortfahren?`, () => {
+                    setSettings(prev => ({ ...prev, watchCount: count, watches: prev.watches.slice(0, count) }));
+                });
+                return;
+            }
+        }
+        setSettings(prev => {
+            const nw = [...prev.watches];
+            while (nw.length < count)
+                nw.push({ name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' });
+            return { ...prev, watchCount: count, watches: nw.slice(0, count) };
+        });
+    };
+    const handleWatchChange = (i, field, value) => {
+        setSettings(prev => { const nw = [...prev.watches]; nw[i] = { ...nw[i], [field]: value }; return { ...prev, watches: nw }; });
+    };
+    const autoLightHours = useMemo(() => {
+        if (!settings.watches.length)
+            return 0;
+        return Math.round(settings.watches.filter(w => w.hasLight).length * (8 / settings.watches.length) * 10) / 10;
+    }, [settings.watches]);
+    const effectiveLH = settings.lightHoursOverride != null && settings.lightHoursOverride !== '' ? (parseFloat(settings.lightHoursOverride) || 0) : autoLightHours;
+    return (React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg" },
+        React.createElement("h3", { className: "text-xl font-bold mb-4" }, "Long Rest Encounter"),
+        React.createElement("div", { className: "grid grid-cols-1 md:grid-cols-2 gap-4" },
+            React.createElement(TerrainSelect, { value: settings.terrain, onChange: v => set('terrain', v) }),
+            React.createElement("div", null,
+                React.createElement("label", { className: "block text-sm text-muted mb-1" }, "Anzahl Wachschichten"),
+                React.createElement("input", { type: "number", min: "1", max: "8", value: settings.watchCount, onChange: handleWatchCountChange, className: "w-full p-2 rounded-lg border border-border-color bg-input-bg text-white" }))),
+        React.createElement("div", { className: "mt-3 p-3 bg-glass rounded-lg" },
+            React.createElement("div", { className: "flex justify-between items-center text-sm" },
+                React.createElement("span", { className: "text-muted" },
+                    "Lichtstunden (auto): ",
+                    React.createElement("strong", { className: "text-white" },
+                        autoLightHours,
+                        "h")),
+                React.createElement("div", { className: "flex items-center gap-2" },
+                    React.createElement("label", { className: "text-muted text-xs" }, "Manuell:"),
+                    React.createElement("input", { type: "number", min: "0", max: "8", step: "0.5", placeholder: "\u2014", value: settings.lightHoursOverride ?? '', onChange: e => set('lightHoursOverride', e.target.value === '' ? null : e.target.value), className: "w-16 p-1 text-sm text-center rounded border border-border-color bg-input-bg text-white" }))),
+            React.createElement("div", { className: "text-xs text-muted mt-1" },
+                "Effektiv: ",
+                React.createElement("strong", { className: "text-accent" },
+                    effectiveLH,
+                    "h"),
+                " \u2014 ",
+                settings.watches.filter(w => w.hasLight).length,
+                "/",
+                settings.watches.length,
+                " Wachen mit Licht")),
+        React.createElement("div", { className: "mt-4 space-y-2" }, settings.watches.map((w, i) => {
+            const wLighting = w.hasLight ? 'bright' : (w.lighting || 'darkness');
+            const vm = getVisionMod(wLighting, w.vision);
+            const effPP = w.pp + vm.mod;
+            return (React.createElement("div", { key: i, className: "grid grid-cols-1 md:grid-cols-[auto,auto,1fr,100px,1fr,80px,50px] gap-2 items-end p-3 bg-glass rounded-lg" },
+                React.createElement("div", { className: "font-bold text-accent self-center text-sm" },
+                    "W",
+                    i + 1),
+                React.createElement("button", { onClick: () => handleWatchChange(i, 'hasLight', !w.hasLight), title: w.hasLight ? 'Licht AN → erzwingt Bright Light' : 'Licht AUS → Umgebungslicht', className: `self-center p-1.5 rounded text-sm border transition-colors ${w.hasLight ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50' : 'bg-input-bg text-muted border-border-color'}` }, w.hasLight ? '🔥' : '🌑'),
+                React.createElement("div", null,
+                    React.createElement("label", { className: "text-xs text-muted" }, "Charakter"),
+                    React.createElement("input", { value: w.name, onChange: e => handleWatchChange(i, 'name', e.target.value), placeholder: "Name", className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white" })),
+                React.createElement("div", null,
+                    React.createElement("label", { className: "text-xs text-muted" }, "Umgebung"),
+                    React.createElement("select", { value: w.lighting || 'darkness', onChange: e => handleWatchChange(i, 'lighting', e.target.value), disabled: w.hasLight, className: `w-full p-1.5 text-sm rounded-md border border-border-color ${w.hasLight ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' : 'bg-bg-secondary text-white'}` }, w.hasLight ? React.createElement("option", { value: "bright" }, "\u2600\uFE0F Bright (Licht)") : LIGHTING_OPTIONS.map(o => React.createElement("option", { key: o.value, value: o.value }, o.label)))),
+                React.createElement("div", null,
+                    React.createElement("label", { className: "text-xs text-muted" }, "Vision"),
+                    React.createElement("select", { value: w.vision, onChange: e => handleWatchChange(i, 'vision', e.target.value), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-bg-secondary text-white" }, Object.entries(VISION_NAMES).map(([k, n]) => React.createElement("option", { key: k, value: k }, n)))),
+                React.createElement("div", null,
+                    React.createElement("label", { className: "text-xs text-muted" }, "Pass. Perc."),
+                    React.createElement("input", { type: "number", min: "1", max: "30", value: w.pp, onChange: e => handleWatchChange(i, 'pp', parseInt(e.target.value, 10) || 1), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white" })),
+                React.createElement("div", { className: "flex flex-col items-center self-end" },
+                    React.createElement("label", { className: "text-[9px] text-muted leading-none mb-0.5" }, "Eff."),
+                    React.createElement("div", { className: `text-sm font-bold ${vm.mod < 0 ? 'text-bad' : 'text-good'}` }, effPP))));
+        })),
+        React.createElement("div", { className: "flex gap-2 mt-4" },
+            React.createElement("button", { onClick: onRestRoll, className: "flex-1 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:opacity-90 transition-opacity" }, "Long Rest w\u00FCrfeln"))));
+};
+// ==========================================
+// MATRIX EDITOR
+// ==========================================
+const MatrixEditor = ({ matrix, setMatrix, addLog, triggerModal, mode }) => {
+    const handleDayChange = (area, type, index, value) => {
+        setMatrix(prev => {
+            const nm = JSON.parse(JSON.stringify(prev));
+            nm.day[area][type][index] = value;
+            const ranges = ['hostile', 'neutral', 'poi'].map(t => ({ name: t, from: nm.day[area][t][0], to: nm.day[area][t][1] })).sort((a, b) => a.from - b.from);
+            let changed = false;
+            for (let i = 0; i < ranges.length - 1; i++) {
+                const c = ranges[i], n = ranges[i + 1];
+                if (c.to >= n.from && c.to > 0 && n.from > 0) {
+                    const g = c.to - n.from + 1;
+                    nm.day[area][n.name][0] += g;
+                    nm.day[area][n.name][1] += g;
+                    changed = true;
+                }
+            }
+            if (changed)
+                addLog(`Matrix: Bereiche für '${area}' automatisch angepasst.`);
+            return nm;
+        });
+    };
+    const handleNightChange = (area, type, value, index) => {
+        setMatrix(prev => { const nm = JSON.parse(JSON.stringify(prev)); if (type === 'basis')
+            nm.night[area].basis[index] = value;
+        else
+            nm.night[area][type] = value; return nm; });
+    };
+    const resetMatrix = () => triggerModal('confirm', 'Matrix Reset', 'Matrix auf Standardwerte zurücksetzen?', () => { setMatrix(JSON.parse(JSON.stringify(DEFAULTS))); addLog('Matrix zurückgesetzt.'); });
+    return (React.createElement("section", { className: "bg-card rounded-xl p-4 shadow-lg mt-4" },
+        React.createElement("div", { className: "flex justify-between items-center mb-4" },
+            React.createElement("h3", { className: "text-xl font-bold" }, "Begegnungs-Matrix"),
+            React.createElement("button", { onClick: resetMatrix, className: "bg-transparent border border-border-color text-muted py-1 px-3 rounded-lg hover:bg-glass transition-colors text-sm" }, "\uD83D\uDD04 Reset")),
+        React.createElement("div", { className: "text-sm p-3 bg-glass rounded-lg mb-4 text-muted" },
+            React.createElement("strong", null, "Anleitung:"),
+            " d100-Werte eintragen. Bereiche werden automatisch angepasst."),
+        mode === 'day' && (React.createElement("div", { className: "overflow-x-auto" },
+            React.createElement("table", { className: "w-full border-collapse text-sm text-center" },
+                React.createElement("thead", { className: "text-muted" },
+                    React.createElement("tr", null,
+                        React.createElement("th", { className: "p-2 border border-border-color text-left" }, "Gebiet"),
+                        React.createElement("th", { className: "p-2 border border-border-color", colSpan: 2 }, "Hostile"),
+                        React.createElement("th", { className: "p-2 border border-border-color", colSpan: 2 }, "Neutral"),
+                        React.createElement("th", { className: "p-2 border border-border-color", colSpan: 2 }, "POI"))),
+                React.createElement("tbody", null, Object.entries(matrix.day).map(([area, data]) => (React.createElement("tr", { key: area },
+                    React.createElement("td", { className: "p-2 border border-border-color text-left font-semibold" }, area),
+                    ['hostile', 'neutral', 'poi'].flatMap(type => [
+                        React.createElement("td", { key: `${area}-${type}-0`, className: "p-1 border border-border-color" }, type === 'hostile' ? (React.createElement("div", { className: "flex items-center justify-center" },
+                            React.createElement("input", { type: "number", disabled: true, value: 1, className: "w-14 p-1 text-center rounded-md border border-border-color bg-input-bg text-muted opacity-40 cursor-not-allowed" }))) : (React.createElement(MatrixInput, { value: data[type][0], onChange: v => handleDayChange(area, type, 0, v), onReset: () => handleDayChange(area, type, 0, DEFAULTS.day[area][type][0]) }))),
+                        React.createElement("td", { key: `${area}-${type}-1`, className: "p-1 border border-border-color" },
+                            React.createElement(MatrixInput, { value: data[type][1], onChange: v => handleDayChange(area, type, 1, v), onReset: () => handleDayChange(area, type, 1, DEFAULTS.day[area][type][1]) }))
+                    ])))))))),
+        mode === 'night' && (React.createElement("div", { className: "overflow-x-auto" },
+            React.createElement("table", { className: "w-full border-collapse text-sm text-center" },
+                React.createElement("thead", { className: "text-muted" },
+                    React.createElement("tr", null,
+                        React.createElement("th", { className: "p-2 border border-border-color text-left" }, "Gebiet"),
+                        React.createElement("th", { className: "p-2 border border-border-color" }, "Schwelle (1-X)"),
+                        React.createElement("th", { className: "p-2 border border-border-color" }, "+Licht/Std"))),
+                React.createElement("tbody", null, Object.entries(matrix.night).map(([area, data]) => {
+                    const def = DEFAULTS.night[area];
+                    return (React.createElement("tr", { key: area },
+                        React.createElement("td", { className: "p-2 border border-border-color text-left font-semibold" }, area),
+                        React.createElement("td", { className: "p-1 border border-border-color" },
+                            React.createElement(MatrixInput, { value: data.basis[1], onChange: v => handleNightChange(area, 'basis', v, 1), onReset: () => handleNightChange(area, 'basis', def.basis[1], 1) })),
+                        React.createElement("td", { className: "p-1 border border-border-color" },
+                            React.createElement(MatrixInput, { value: data.light, onChange: v => handleNightChange(area, 'light', v), onReset: () => handleNightChange(area, 'light', def.light) }))));
+                })))))));
+};
+// ==========================================
+// FLOW PANELS
+// ==========================================
+const FlowPanels = ({ flowState, setFlowState, setResult, setResultType, addLog, triggerModal, settings, partyMembers }) => {
+    const [li, setLi] = useState({});
+    const inp = (k, v) => setLi(prev => ({ ...prev, [k]: v }));
+    const cancel = () => { addLog('Ablauf abgebrochen.'); setResult('Ablauf abgebrochen.'); setResultType('info'); setFlowState(null); };
+    const bestEffPP = useMemo(() => {
+        if (!partyMembers || !partyMembers.length)
+            return null;
+        const lighting = settings.travelLighting || 'bright';
+        const paceMod = settings.pace === 'fast' ? -5 : settings.pace === 'slow' ? 5 : 0;
+        let best = null;
+        partyMembers.forEach(m => {
+            const vm = getVisionMod(lighting, m.vision || 'none');
+            const eff = m.pp + vm.mod + paceMod;
+            if (!best || eff > best.eff)
+                best = { ...m, eff, visionMod: vm.mod, paceMod };
+        });
+        return best;
+    }, [partyMembers, settings.travelLighting, settings.pace]);
+    const content = useMemo(() => {
+        switch (flowState.step) {
+            case 'enemyStealthChoice': return (React.createElement(FlowPanel, { title: "Versuchen die Gegner sich anzuschleichen?" },
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => { addLog('Gegner versuchen Stealth'); setFlowState({ ...flowState, step: 'enemyStealthInput' }); } }, "Ja"),
+                    React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: () => {
+                            if (flowState.context === 'night') {
+                                setResult('Normale Begegnung. Wache bemerkt Gegner automatisch.');
+                                setResultType('hostile');
+                                addLog('Kein Stealth → alle wach');
+                                setFlowState(null);
+                            }
+                            else {
+                                addLog('Kein Gegner-Stealth → Passive Perception Contest');
+                                setFlowState({ ...flowState, step: 'ppContest', enemyStealthAvg: null });
+                            }
+                        } }, "Nein"))));
+            case 'enemyStealthInput': return (React.createElement(FlowPanel, { title: "Gegner Stealth Rolls" },
+                React.createElement("input", { autoFocus: true, placeholder: "z.B. 12, 13, 14", value: li.enemyRolls || '', onChange: e => inp('enemyRolls', e.target.value), className: "w-full p-2 mb-2 rounded-lg border border-border-color bg-input-bg text-white" }),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => {
+                            const rolls = parseInts(li.enemyRolls || '');
+                            if (!rolls.length)
+                                return triggerModal('alert', 'Fehler', 'Bitte Würfe eingeben.');
+                            const ea = Math.round(avg(rolls));
+                            addLog(`Gegner Stealth: [${rolls.join(', ')}] → ø ${ea}`);
+                            if (flowState.context === 'night' && flowState.watchPerception) {
+                                const pp = flowState.watchPerception.effectivePP;
+                                addLog(`Auto-Detection (Nacht): Eff. Passive Perception ${pp} vs Stealth ø ${ea}`);
+                                if (pp >= ea) {
+                                    setResult(`Gegner erkannt! ${flowState.affectedWatch?.name || 'Wache'} bemerkt die Feinde (Passive Perception ${pp} ≥ Stealth ${ea}) → weckt alle.`);
+                                    setResultType('hostile');
+                                    addLog(`erkannt → alle wach`);
+                                }
+                                else {
+                                    setResult(`Gruppe überrascht! ${flowState.affectedWatch?.name || 'Wache'} bemerkt nichts (Passive Perception ${pp} < Stealth ${ea}).`);
+                                    setResultType('hostile');
+                                    addLog(`überrascht → nur ${flowState.affectedWatch?.name || 'Wache'} wach`);
+                                }
+                                setFlowState(null);
+                            }
+                            else if (flowState.context === 'day' && bestEffPP) {
+                                const pp = bestEffPP.eff;
+                                addLog(`Auto-Detection (Tag): ${bestEffPP.name || 'Unbenannt'} Eff. Passive Perception ${pp} vs Stealth ø ${ea}`);
+                                if (pp >= ea) {
+                                    setResult(`Gegner erkannt! ${bestEffPP.name || 'Gruppe'} bemerkt die Feinde (Passive Perception ${pp} ≥ Stealth ${ea}).`);
+                                    setResultType(flowState.encounterType || 'hostile');
+                                    addLog(`erkannt → normale Begegnung`);
+                                }
+                                else {
+                                    setResult(`Gruppe überrascht! Gegner geschlichen (Stealth ${ea} > Passive Perception ${pp}).`);
+                                    setResultType('hostile');
+                                    addLog(`überrascht → Gegner haben Surprise`);
+                                }
+                                setFlowState(null);
+                            }
+                            else {
+                                setFlowState({ ...flowState, step: 'detection', enemyStealthAvg: ea });
+                            }
+                        } }, "Best\u00E4tigen"),
+                    React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
+            case 'ppContest': {
+                const autoPP = bestEffPP ? bestEffPP.eff.toString() : '';
+                const dPP = li.playerPP !== undefined ? li.playerPP : autoPP;
+                return (React.createElement(FlowPanel, { title: "Passive Perception Contest" },
+                    bestEffPP && React.createElement("div", { className: "p-2 mb-4 bg-glass border border-border-color text-muted rounded-lg text-sm" },
+                        "Auto: ",
+                        React.createElement("strong", { className: "text-white" }, bestEffPP.name || 'Unbenannt'),
+                        " \u2014 Basis ",
+                        bestEffPP.pp,
+                        bestEffPP.visionMod !== 0 && React.createElement("span", null,
+                            " ",
+                            bestEffPP.visionMod > 0 ? '+' : '',
+                            bestEffPP.visionMod,
+                            " Vision"),
+                        bestEffPP.paceMod !== 0 && React.createElement("span", null,
+                            " ",
+                            bestEffPP.paceMod > 0 ? '+' : '',
+                            bestEffPP.paceMod,
+                            " Tempo"),
+                        ' ',
+                        "= ",
+                        React.createElement("strong", { className: "text-accent" }, bestEffPP.eff)),
+                    React.createElement("div", { className: "grid grid-cols-2 gap-4 mb-4" },
+                        React.createElement("div", null,
+                            React.createElement("label", { className: "text-sm text-muted" }, "Eff. Passive Perception der Gruppe"),
+                            React.createElement("input", { autoFocus: true, type: "number", min: "1", value: dPP, onChange: e => inp('playerPP', e.target.value), className: "w-full p-2 rounded-lg border border-border-color bg-input-bg text-white" })),
+                        React.createElement("div", null,
+                            React.createElement("label", { className: "text-sm text-muted" }, "Passive Perception der Gegner"),
+                            React.createElement("input", { type: "number", min: "1", value: li.enemyPP || '', onChange: e => inp('enemyPP', e.target.value), className: "w-full p-2 rounded-lg border border-border-color bg-input-bg text-white" }))),
+                    React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => {
+                                const pp = parseInt(dPP || '0'), ep = parseInt(li.enemyPP || '0');
+                                if (!pp || !ep)
+                                    return triggerModal('alert', 'Fehler', 'Bitte Passive Perception eingeben.');
+                                addLog(`Passive Perception Contest: Spieler ${pp} vs Gegner ${ep}`);
+                                if (pp > ep) {
+                                    setResult(`Spieler gewinnen (${pp} > ${ep}) → Gruppe kann schleichen`);
+                                    setResultType('info');
+                                    setFlowState({ ...flowState, step: 'stealthChoice', winner: 'players', playerPP: pp, enemyPP: ep });
+                                }
+                                else if (ep > pp) {
+                                    setResult(`Gegner gewinnen (${ep} > ${pp}) → Gegner können schleichen`);
+                                    setResultType('hostile');
+                                    setFlowState({ ...flowState, step: 'stealthChoice', winner: 'enemies', playerPP: pp, enemyPP: ep });
+                                }
+                                else {
+                                    setResult(`Unentschieden (${pp} = ${ep}) → Normale Begegnung`);
+                                    setResultType('neutral');
+                                    addLog('Unentschieden → normale Begegnung');
+                                    setFlowState(null);
+                                }
+                            } }, "Auswerten"),
+                        React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
+            }
+            case 'stealthChoice': return (React.createElement(FlowPanel, { title: flowState.winner === 'players' ? 'Möchte die Gruppe schleichen?' : 'Versuchen die Gegner zu schleichen?' },
+                React.createElement("p", { className: "text-muted mb-4" }, flowState.winner === 'players' ? 'Die Gruppe hat die Gegner zuerst bemerkt.' : 'Die Gegner haben die Gruppe zuerst bemerkt.'),
+                flowState.winner === 'players' && flowState.vehicle && React.createElement("div", { className: "p-2 mb-2 bg-bad/20 border border-bad/50 text-bad rounded-lg text-sm" }, "\u26A0\uFE0F FAHRZEUG: Stealth mit Nachteil!"),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => { addLog(`${flowState.winner === 'players' ? 'Gruppe' : 'Gegner'} schleichen`); setFlowState({ ...flowState, step: 'stealthInput' }); } }, "Ja, schleichen"),
+                    React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: () => { addLog('Kein Stealth → normale Begegnung'); setResult('Normale Begegnung.'); setResultType(flowState.encounterType || 'info'); setFlowState(null); } }, "Normale Begegnung"))));
+            case 'stealthInput': return (React.createElement(FlowPanel, { title: "Stealth Rolls eingeben" },
+                React.createElement("input", { autoFocus: true, placeholder: "z.B. 14, 13, 10", value: li.stealthRolls || '', onChange: e => inp('stealthRolls', e.target.value), className: "w-full p-2 mb-2 rounded-lg border border-border-color bg-input-bg text-white" }),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => {
+                            const rolls = parseInts(li.stealthRolls || '');
+                            if (!rolls.length)
+                                return triggerModal('alert', 'Fehler', 'Bitte Würfe eingeben.');
+                            const sa = Math.round(avg(rolls));
+                            addLog(`Stealth: [${rolls.join(', ')}] → ø ${sa}`);
+                            setFlowState({ ...flowState, step: 'detection', stealthAvg: sa });
+                        } }, "Auswerten"),
+                    React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
+            case 'detection': {
+                const isN = flowState.context === 'night';
+                const thr = flowState.enemyStealthAvg ?? flowState.stealthAvg ?? 0;
+                let lbl = "Passive Perception", dv = "10";
+                if (isN && flowState.watchPerception) {
+                    lbl = `Aktive Perception: ${flowState.affectedWatch?.name || 'Wache'}`;
+                    dv = flowState.watchPerception.effectivePP.toString();
+                }
+                else if (flowState.winner === 'players') {
+                    lbl = "Passive Perception der Gegner";
+                    dv = flowState.enemyPP?.toString() ?? "10";
+                }
+                else if (flowState.winner === 'enemies') {
+                    lbl = "Passive Perception der Gruppe";
+                    dv = flowState.playerPP?.toString() ?? "10";
+                }
+                return (React.createElement(FlowPanel, { title: "Detection Check" },
+                    React.createElement("label", { className: "text-sm text-muted" }, lbl),
+                    React.createElement("input", { autoFocus: true, type: "number", min: "1", value: li.detectionPP ?? dv, onChange: e => inp('detectionPP', e.target.value), className: "w-full p-2 mb-2 rounded-lg border border-border-color bg-input-bg text-white" }),
+                    React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => {
+                                const dp = parseInt(li.detectionPP ?? dv);
+                                addLog(`Detection: Passive Perception ${dp} vs Stealth ${thr}`);
+                                if (dp >= thr) {
+                                    setResult(isN ? 'Gegner erkannt! Wache weckt alle.' : 'Stealth erkannt! Normale Begegnung.');
+                                    setResultType(isN ? 'hostile' : flowState.encounterType || 'info');
+                                    addLog(isN ? `erkannt durch ${flowState.affectedWatch?.name || 'Wache'} → alle wach` : 'erkannt → normale Begegnung');
+                                }
+                                else {
+                                    if (isN) {
+                                        setResult(`Gruppe überrascht! Nur ${flowState.affectedWatch?.name || 'Wache'} ist wach.`);
+                                        setResultType('hostile');
+                                        addLog(`überrascht → nur ${flowState.affectedWatch?.name || 'Wache'} wach`);
+                                    }
+                                    else if (flowState.winner === 'players') {
+                                        setResult('Begegnung vermieden! Erfolgreich geschlichen.');
+                                        setResultType('none');
+                                        addLog('vermieden → geschlichen');
+                                    }
+                                    else {
+                                        setResult('Gruppe überrascht! Gegner geschlichen.');
+                                        setResultType('hostile');
+                                        addLog('überrascht → Gegner geschlichen');
+                                    }
+                                }
+                                setFlowState(null);
+                            } }, "Auswerten"),
+                        React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
+            }
+            case 'nightEncounterInfo': {
+                const wl = flowState.watchLighting || (flowState.watchHasLight ? 'bright' : 'darkness');
+                const wlLabel = LIGHTING_OPTIONS.find(o => o.value === wl)?.label || wl;
+                const hasMalus = flowState.watchPerception && flowState.watchPerception.effectivePP < flowState.affectedWatch?.pp;
+                return (React.createElement(FlowPanel, { title: `Long Rest Encounter: ${flowState.affectedWatch?.name || 'Unbenannt'}` },
+                    React.createElement("div", { className: "text-muted mb-4 space-y-1" },
+                        React.createElement("p", null,
+                            React.createElement("strong", null, "Vision:"),
+                            " ",
+                            VISION_NAMES[flowState.affectedWatch?.vision] || 'N/A'),
+                        React.createElement("p", null,
+                            React.createElement("strong", null, "Lichtverh\u00E4ltnis:"),
+                            " ",
+                            flowState.watchHasLight ? '🔥 Eigenes Licht → Bright Light' : wlLabel),
+                        React.createElement("p", null,
+                            React.createElement("strong", null, "Basis Passive Perception:"),
+                            " ",
+                            flowState.affectedWatch?.pp,
+                            " \u2192 ",
+                            React.createElement("strong", null, "Effektiv:"),
+                            " ",
+                            flowState.watchPerception?.effectivePP,
+                            " (",
+                            flowState.watchPerception?.modifier,
+                            ")")),
+                    hasMalus && React.createElement("div", { className: "p-2 mb-2 bg-bad/20 border border-bad/50 text-bad rounded-lg text-sm" },
+                        "\u26A0\uFE0F Passive Perception reduziert: ",
+                        flowState.watchPerception?.modifier),
+                    React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => { addLog('Stealth-Mechanik gestartet'); setFlowState({ ...flowState, step: 'enemyStealthChoice' }); } }, "Stealth-Mechanik starten"),
+                        React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
+            }
+            default: return null;
+        }
+    }, [flowState, li, setFlowState, setResult, setResultType, addLog, triggerModal, settings, bestEffPP]);
+    if (!content)
+        return null;
+    return React.createElement("div", { className: "mt-4" }, content);
+};
+// ==========================================
+// RESOURCE MANAGER
+// ==========================================
+const ResourceManager = ({ creatures, setCreatures, storages, setStorages, addLog, triggerModal }) => {
+    const [lastSS, setLastSS] = useState(null);
+    const [lastCS, setLastCS] = useState(null);
+    const [cMsg, setCMsg] = useState(null);
+    const [isHot, setIsHot] = useState(false);
+    const [rat, setRat] = useState({ isOpen: false, selections: {} });
+    const [fs, setFs] = useState({ step: 'idle', dc: 15, wisMod: 0, checkResult: 0, foodFound: 0, waterFound: 0, mishap: false, selectedFoodStoreId: '', selectedWaterStoreId: '', isRanger: false });
+    const getAvail = (type) => storages.filter(s => { if (!s.isActive || s.storageType !== type)
+        return false; const cl = type === 'water' ? s.water : (s.food + (s.feed || 0) * FEED_WEIGHT_LB); return cl < s.maxCapacity; });
+    useEffect(() => { if (fs.step === 'result') {
+        const af = getAvail('food_feed'), aw = getAvail('water');
+        setFs(p => ({ ...p, selectedFoodStoreId: af.length ? af[0].id : '', selectedWaterStoreId: aw.length ? aw[0].id : '' }));
+    } }, [fs.step, storages]);
+    const numChange = (id, field, vs, setter) => setter(p => p.map(item => item.id !== id ? item : { ...item, [field]: vs === '' ? 0 : (isNaN(parseFloat(vs)) ? 0 : parseFloat(vs)) }));
+    const storTypeChange = (id, nt) => setStorages(p => p.map(s => s.id !== id ? s : { ...s, storageType: nt, food: nt === 'water' ? 0 : s.food, feed: nt === 'water' ? 0 : s.feed, water: nt === 'food_feed' ? 0 : s.water }));
+    const addC = () => setCreatures(p => [...p, { id: generateId(), name: 'Neuer Charakter', size: 'Medium', usesFeed: false, conMod: 0, daysWithoutFood: 0, exhaustion: 0 }]);
+    const updC = (id, f, v) => setCreatures(p => p.map(c => c.id === id ? { ...c, [f]: v } : c));
+    const remC = (id) => triggerModal('confirm', 'Löschen', 'Eintrag wirklich löschen?', () => setCreatures(p => p.filter(c => c.id !== id)));
+    const addS = () => setStorages(p => [...p, { id: generateId(), name: 'Neues Lager', isActive: true, storageType: 'food_feed', maxCapacity: 100, food: 0, water: 0, feed: 0 }]);
+    const updS = (id, f, v) => setStorages(p => p.map(s => s.id === id ? { ...s, [f]: v } : s));
+    const remS = (id) => triggerModal('confirm', 'Lager löschen', 'Wirklich löschen?', () => setStorages(p => p.filter(s => s.id !== id)));
+    const getReq = (c) => { const r = CONSUMPTION_RATES[c.size] || CONSUMPTION_RATES['Medium']; const wr = isHot ? r.water * 2 : r.water; return { food: c.usesFeed ? 0 : r.food, feed: c.usesFeed ? r.feed : 0, water: wr }; };
+    const totalNeeds = useMemo(() => creatures.reduce((a, c) => { const r = getReq(c); return { food: a.food + r.food, water: a.water + r.water, feed: a.feed + r.feed }; }, { food: 0, water: 0, feed: 0 }), [creatures, isHot]);
+    const totalStored = useMemo(() => storages.reduce((a, s) => { if (!s.isActive)
+        return a; return { food: a.food + safeFloat(s.food), water: a.water + safeFloat(s.water), feed: a.feed + safeFloat(s.feed || 0) }; }, { food: 0, water: 0, feed: 0 }), [storages]);
+    const openRat = () => { const is = {}; creatures.forEach(c => { is[c.id] = { food: true, water: true }; }); setRat({ isOpen: true, selections: is }); };
+    const ratTotals = useMemo(() => { if (!rat.isOpen)
+        return { food: 0, feed: 0, water: 0 }; return creatures.reduce((a, c) => { const s = rat.selections[c.id]; if (!s)
+        return a; const r = getReq(c); return { food: a.food + (s.food ? r.food : 0), feed: a.feed + (s.food ? r.feed : 0), water: a.water + (s.water ? r.water : 0) }; }, { food: 0, feed: 0, water: 0 }); }, [rat, creatures, isHot]);
+    const togSel = (cid, type) => setRat(p => ({ ...p, selections: { ...p.selections, [cid]: { ...p.selections[cid], [type]: !p.selections[cid][type] } } }));
+    const confirmCon = () => {
+        const n = ratTotals, e = 0.001;
+        if (n.food > totalStored.food + e || n.feed > totalStored.feed + e || n.water > totalStored.water + e)
+            return;
+        setLastSS(JSON.parse(JSON.stringify(storages)));
+        setLastCS(JSON.parse(JSON.stringify(creatures)));
+        const ns = storages.map(s => ({ ...s }));
+        let fn = n.food, fen = n.feed, wn = n.water;
+        for (const st of ns) {
+            if (!st.isActive)
+                continue;
+            let sf = safeFloat(st.food), sfe = safeFloat(st.feed || 0), sw = safeFloat(st.water);
+            if (fn > e && sf > e) {
+                const t = Math.min(sf, fn);
+                sf -= t;
+                fn -= t;
+            }
+            if (fen > e && sfe > e) {
+                const t = Math.min(sfe, fen);
+                sfe -= t;
+                fen -= t;
+            }
+            if (wn > e && sw > e) {
+                const t = Math.min(sw, wn);
+                sw -= t;
+                wn -= t;
+            }
+            st.food = Math.round(sf * 100) / 100;
+            st.feed = Math.round(sfe * 100) / 100;
+            st.water = Math.round(sw * 100) / 100;
+        }
+        setStorages(ns);
+        const nc = creatures.map(c => { const s = rat.selections[c.id]; if (!s)
+            return c; let dw = c.daysWithoutFood, ex = c.exhaustion, ge = 0; if (!s.food) {
+            dw++;
+            const l = Math.max(1, 3 + (c.conMod || 0));
+            if (dw > l)
+                ge++;
+        }
+        else {
+            dw = 0;
+        } if (!s.water) {
+            ge += (c.exhaustion + ge > 0) ? 2 : 1;
+        } ex += ge; if (s.food && s.water && ge === 0 && c.exhaustion > 0)
+            ex--; ex = Math.min(6, Math.max(0, ex)); return { ...c, daysWithoutFood: dw, exhaustion: ex }; });
+        setCreatures(nc);
+        setRat({ isOpen: false, selections: {} });
+        const fc = Object.values(rat.selections).filter(s => s.food).length;
+        setCMsg(`Tagesabschluss: ${fc}/${creatures.length} versorgt.`);
+        addLog('Tagesabschluss durchgeführt.');
+        setTimeout(() => setCMsg(null), 5000);
+    };
+    const undo = () => { if (!lastSS || !lastCS)
+        return; setStorages(lastSS); setCreatures(lastCS); setLastSS(null); setLastCS(null); setCMsg('Rückgängig.'); addLog('Widerrufen.'); setTimeout(() => setCMsg(null), 3000); };
+    const startFor = () => setFs({ ...fs, step: 'config', dc: 15, wisMod: 0, checkResult: 0, isRanger: false });
+    const wanderer = () => setFs(p => ({ ...p, step: 'result', foodFound: 6, waterFound: 6, mishap: false, checkResult: 999 }));
+    const createFood = () => setFs(p => ({ ...p, step: 'result', foodFound: 45, waterFound: 30, mishap: false, checkResult: 999 }));
+    const calcFor = () => { const ck = fs.checkResult, dc = fs.dc; let f = 0, w = 0, m = false; const ml = fs.isRanger ? 2 : 1; if (ck >= dc) {
+        f = Math.max(0, rnd(6) + fs.wisMod) * ml;
+        w = Math.max(0, rnd(6) + fs.wisMod) * ml;
+    }
+    else if (ck <= dc - 5) {
+        m = true;
+    } setFs(p => ({ ...p, step: 'result', foodFound: f, waterFound: w, mishap: m })); };
+    const storeF = () => { const t = fs.selectedFoodStoreId; if (!t)
+        return; const ts = storages.find(s => s.id === t); if (!ts)
+        return; const cl = ts.food + (ts.feed || 0) * FEED_WEIGHT_LB; const sp = ts.maxCapacity - cl; const ta = Math.min(sp, fs.foodFound); if (ta <= 0) {
+        triggerModal('alert', 'Voll', 'Lager voll.');
+        return;
+    } setStorages(p => p.map(s => s.id === t ? { ...s, food: s.food + ta } : s)); setFs(p => ({ ...p, foodFound: p.foodFound - ta })); };
+    const storeW = () => { const t = fs.selectedWaterStoreId; if (!t)
+        return; const ts = storages.find(s => s.id === t); if (!ts)
+        return; const sp = ts.maxCapacity - ts.water; const ta = Math.min(sp, fs.waterFound); if (ta <= 0) {
+        triggerModal('alert', 'Voll', 'Lager voll.');
+        return;
+    } setStorages(p => p.map(s => s.id === t ? { ...s, water: s.water + ta } : s)); setFs(p => ({ ...p, waterFound: p.waterFound - ta })); };
+    const discardFor = () => triggerModal('confirm', 'Wegwerfen?', `${fs.foodFound}lb Essen und ${fs.waterFound}gal Wasser zurücklassen?`, () => setFs(p => ({ ...p, step: 'idle' })));
+    return (React.createElement("div", { className: "grid grid-cols-1 lg:grid-cols-2 gap-4" },
+        rat.isOpen && (React.createElement("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" },
+            React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-2xl w-full p-6 flex flex-col max-h-[90vh]" },
+                React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Rationierung & Verbrauch"),
+                React.createElement("div", { className: "grid grid-cols-3 gap-4 mb-4 text-center bg-glass p-3 rounded-lg" },
+                    React.createElement("div", null,
+                        React.createElement("div", { className: "text-xs text-muted" }, "Essen"),
+                        React.createElement("div", { className: `${ratTotals.food > totalStored.food ? 'text-bad' : 'text-white'} font-bold` },
+                            ratTotals.food.toFixed(1),
+                            "/",
+                            totalStored.food.toFixed(1))),
+                    React.createElement("div", null,
+                        React.createElement("div", { className: "text-xs text-muted" }, "Futter"),
+                        React.createElement("div", { className: `${ratTotals.feed > totalStored.feed ? 'text-bad' : 'text-white'} font-bold` },
+                            ratTotals.feed.toFixed(1),
+                            "/",
+                            totalStored.feed.toFixed(1))),
+                    React.createElement("div", null,
+                        React.createElement("div", { className: "text-xs text-muted" }, "Wasser"),
+                        React.createElement("div", { className: `${ratTotals.water > totalStored.water ? 'text-bad' : 'text-white'} font-bold` },
+                            ratTotals.water.toFixed(1),
+                            "/",
+                            totalStored.water.toFixed(1)))),
+                React.createElement("div", { className: "overflow-y-auto flex-grow mb-4 border border-border-color rounded-lg" },
+                    React.createElement("table", { className: "w-full text-sm text-left" },
+                        React.createElement("thead", { className: "bg-white/5 text-muted sticky top-0" },
+                            React.createElement("tr", null,
+                                React.createElement("th", { className: "p-3" }, "Name"),
+                                React.createElement("th", { className: "p-3 text-center" }, "Status"),
+                                React.createElement("th", { className: "p-3 text-center" }, "Essen"),
+                                React.createElement("th", { className: "p-3 text-center" }, "Wasser"))),
+                        React.createElement("tbody", { className: "divide-y divide-border-color" }, creatures.map(c => {
+                            const r = getReq(c), s = rat.selections[c.id];
+                            if (!s)
+                                return null;
+                            return (React.createElement("tr", { key: c.id, className: "hover:bg-white/5" },
+                                React.createElement("td", { className: "p-3 font-medium" }, c.name),
+                                React.createElement("td", { className: "p-3 text-center" },
+                                    React.createElement("div", { className: "flex justify-center gap-2" },
+                                        c.daysWithoutFood > 0 && React.createElement("span", { className: "text-orange-400 text-xs px-1.5 py-0.5 bg-orange-400/10 rounded" },
+                                            "Hunger ",
+                                            c.daysWithoutFood,
+                                            "d"),
+                                        c.exhaustion > 0 && React.createElement("span", { className: "text-bad text-xs px-1.5 py-0.5 bg-bad/10 rounded" },
+                                            "\uD83D\uDC80 Lv",
+                                            c.exhaustion),
+                                        c.daysWithoutFood === 0 && c.exhaustion === 0 && React.createElement("span", { className: "text-muted text-xs" }, "-"))),
+                                React.createElement("td", { className: "p-3 text-center" },
+                                    React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
+                                        React.createElement("input", { type: "checkbox", checked: s.food, onChange: () => togSel(c.id, 'food'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-good mb-1" }),
+                                        React.createElement("span", { className: "text-xs text-muted" }, c.usesFeed ? `${r.feed} Unit` : `${r.food} lb`))),
+                                React.createElement("td", { className: "p-3 text-center" },
+                                    React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
+                                        React.createElement("input", { type: "checkbox", checked: s.water, onChange: () => togSel(c.id, 'water'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-accent mb-1" }),
+                                        React.createElement("span", { className: "text-xs text-muted" },
+                                            r.water,
+                                            " gal")))));
+                        })))),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: confirmCon, disabled: ratTotals.food > totalStored.food + 0.001 || ratTotals.feed > totalStored.feed + 0.001 || ratTotals.water > totalStored.water + 0.001, className: "flex-1 bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold py-3 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" }, "Best\u00E4tigen"),
+                    React.createElement("button", { onClick: () => setRat({ isOpen: false, selections: {} }), className: "px-4 py-3 border border-border-color rounded-lg text-muted hover:bg-glass" }, "Abbrechen"))))),
+        fs.step !== 'idle' && (React.createElement("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" },
+            React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto" },
+                fs.step === 'config' && (React.createElement(React.Fragment, null,
+                    React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Nahrungssuche"),
+                    React.createElement("div", { className: "space-y-4 mb-6" },
+                        React.createElement("div", null,
+                            React.createElement("label", { className: "text-sm text-muted block mb-2" }, "DC"),
+                            React.createElement("div", { className: "grid grid-cols-3 gap-2" }, [{ d: 10, l: 'Reichlich' }, { d: 15, l: 'Begrenzt' }, { d: 20, l: 'Karg' }].map(o => React.createElement("button", { key: o.d, onClick: () => setFs(p => ({ ...p, dc: o.d })), className: `p-2 rounded border text-sm ${fs.dc === o.d ? 'bg-accent text-bg-secondary font-bold' : 'bg-input-bg text-muted'}` }, o.l)))),
+                        React.createElement("div", null,
+                            React.createElement("label", { className: "text-sm text-muted block mb-1" }, "WIS Mod"),
+                            React.createElement("input", { type: "number", value: fs.wisMod, onChange: e => setFs(p => ({ ...p, wisMod: parseInt(e.target.value) || 0 })), className: "w-full bg-input-bg rounded p-2 text-white border border-border-color" })),
+                        React.createElement("div", { className: "border-t border-border-color pt-4" },
+                            React.createElement("div", { className: "flex items-center gap-2 mb-3" },
+                                React.createElement("input", { type: "checkbox", id: "rc", checked: fs.isRanger, onChange: e => setFs(p => ({ ...p, isRanger: e.target.checked })), className: "w-4 h-4 rounded" }),
+                                React.createElement("label", { htmlFor: "rc", className: "text-sm text-muted" }, "Natural Explorer (x2)")),
+                            React.createElement("div", { className: "grid gap-2" },
+                                React.createElement("button", { onClick: wanderer, className: "text-left px-3 py-2 bg-glass border rounded text-sm text-accent" }, "\uD83C\uDF0D Wanderer"),
+                                React.createElement("button", { onClick: createFood, className: "text-left px-3 py-2 bg-glass border rounded text-sm text-purple-400" }, "\u2728 Create Food & Water")))),
+                    React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("button", { onClick: () => setFs(p => ({ ...p, step: 'input' })), className: "flex-1 bg-accent text-bg-secondary font-bold py-2 rounded-lg" }, "W\u00FCrfeln"),
+                        React.createElement("button", { onClick: () => setFs(p => ({ ...p, step: 'idle' })), className: "flex-1 border border-border-color text-muted py-2 rounded-lg" }, "Abbrechen")))),
+                fs.step === 'input' && (React.createElement(React.Fragment, null,
+                    React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Survival Check"),
+                    React.createElement("input", { autoFocus: true, type: "number", min: "1", onChange: e => setFs(p => ({ ...p, checkResult: parseInt(e.target.value) || 0 })), className: "w-full bg-input-bg rounded p-3 text-xl text-center text-white mb-6", placeholder: "0" }),
+                    React.createElement("button", { onClick: calcFor, className: "w-full bg-accent text-bg-secondary font-bold py-2 rounded-lg" }, "Auswerten"))),
+                fs.step === 'result' && (React.createElement(React.Fragment, null,
+                    React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Ergebnis"),
+                    React.createElement("div", { className: "mb-6 bg-glass p-4 rounded-lg text-center" }, fs.mishap ? React.createElement("div", { className: "text-bad font-bold" }, "MISSGESCHICK!") : React.createElement("div", { className: "text-white" },
+                        fs.foodFound,
+                        "lb Essen, ",
+                        fs.waterFound,
+                        "gal Wasser")),
+                    !fs.mishap && React.createElement("div", { className: "space-y-4 mb-4" },
+                        fs.foodFound > 0 && React.createElement("div", { className: "bg-glass p-3 rounded-lg" },
+                            React.createElement("label", { className: "text-xs text-muted block mb-1" },
+                                "Essen (",
+                                fs.foodFound,
+                                "lb)"),
+                            React.createElement("div", { className: "flex gap-2" },
+                                React.createElement("select", { value: fs.selectedFoodStoreId, onChange: e => setFs(p => ({ ...p, selectedFoodStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('food_feed').map(s => { const cl = s.food + (s.feed || 0) * FEED_WEIGHT_LB; return React.createElement("option", { key: s.id, value: s.id },
+                                    s.name,
+                                    " (",
+                                    (s.maxCapacity - cl).toFixed(1),
+                                    "lb frei)"); })),
+                                React.createElement("button", { onClick: storeF, className: "bg-good text-bg-secondary px-3 py-1 rounded text-sm font-bold" }, "OK"))),
+                        fs.waterFound > 0 && React.createElement("div", { className: "bg-glass p-3 rounded-lg" },
+                            React.createElement("label", { className: "text-xs text-muted block mb-1" },
+                                "Wasser (",
+                                fs.waterFound,
+                                "gal)"),
+                            React.createElement("div", { className: "flex gap-2" },
+                                React.createElement("select", { value: fs.selectedWaterStoreId, onChange: e => setFs(p => ({ ...p, selectedWaterStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('water').map(s => React.createElement("option", { key: s.id, value: s.id },
+                                    s.name,
+                                    " (",
+                                    (s.maxCapacity - s.water).toFixed(1),
+                                    "gal frei)"))),
+                                React.createElement("button", { onClick: storeW, className: "bg-accent text-bg-secondary px-3 py-1 rounded text-sm font-bold" }, "OK")))),
+                    React.createElement("button", { onClick: discardFor, className: "w-full bg-accent text-bg-secondary font-bold py-2 rounded-lg" }, "Schlie\u00DFen")))))),
+        React.createElement("div", { className: "space-y-4" },
+            React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg" },
+                React.createElement("div", { className: "flex justify-between items-center mb-4" },
+                    React.createElement("h3", { className: "text-xl font-bold" }, "Verbraucher"),
+                    React.createElement("div", { className: "flex items-center gap-2" },
+                        React.createElement("button", { onClick: () => setIsHot(!isHot), className: `text-xs px-2 py-1 rounded border ${isHot ? 'bg-orange-500/20 text-orange-400 border-orange-500' : 'text-muted'}` }, isHot ? '☀️ Heiß' : '☁️ Normal'),
+                        React.createElement("button", { onClick: addC, className: "text-xs bg-glass px-2 py-1 rounded border" }, "+ Neu"))),
+                React.createElement("div", { className: "space-y-2" }, creatures.map((c, idx) => (React.createElement("div", { key: c.id, className: "grid grid-cols-[20px,auto,1fr,auto,40px,80px,30px] gap-2 items-center bg-glass p-2 rounded" },
+                    React.createElement(MoveButtons, { index: idx, length: creatures.length, onMove: d => setCreatures(prev => moveItem(prev, idx, d)) }),
+                    React.createElement("div", { className: "flex flex-col gap-0.5 min-w-[30px]" },
+                        c.daysWithoutFood > 0 && React.createElement("span", { className: "text-[10px] text-white bg-orange-500/50 px-1 rounded text-center" },
+                            "\uD83C\uDF54",
+                            c.daysWithoutFood),
+                        c.exhaustion > 0 && React.createElement("span", { className: "text-[10px] text-white bg-bad px-1 rounded text-center" },
+                            "\uD83D\uDC80",
+                            c.exhaustion)),
+                    React.createElement("input", { className: "bg-transparent text-sm text-white outline-none min-w-0", value: c.name, onChange: e => updC(c.id, 'name', e.target.value), placeholder: "Name" }),
+                    React.createElement("button", { onClick: () => updC(c.id, 'usesFeed', !c.usesFeed), title: "Tierfutter?", className: `p-1.5 rounded ${c.usesFeed ? 'bg-yellow-600 text-white' : 'bg-input-bg text-muted'}` }, "\uD83D\uDC3E"),
+                    React.createElement("div", { className: "flex flex-col items-center" },
+                        React.createElement("label", { className: "text-[9px] text-muted leading-none mb-0.5" }, "CON"),
+                        React.createElement("input", { type: "number", title: "Constitution Modifier \u2014 beeinflusst Hungertage-Limit (3 + CON)", className: "w-full bg-input-bg rounded p-1 text-xs text-center text-white border border-border-color", value: c.conMod, onChange: e => updC(c.id, 'conMod', parseInt(e.target.value) || 0) })),
+                    React.createElement("select", { className: "bg-bg-secondary text-xs rounded p-1 border border-border-color text-white", value: c.size, onChange: e => updC(c.id, 'size', e.target.value) }, Object.keys(CONSUMPTION_RATES).map(s => React.createElement("option", { key: s, value: s }, s))),
+                    React.createElement("button", { onClick: () => remC(c.id), className: "text-muted hover:text-bad" }, "\u00D7")))))),
+            React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg border border-border-color" },
+                React.createElement("h3", { className: "text-lg font-bold mb-3" }, "Tagesabschluss"),
+                React.createElement("div", { className: "text-sm space-y-2 mb-4" },
+                    React.createElement("div", { className: "flex justify-between items-center" },
+                        React.createElement("span", { className: "text-muted" }, "Bedarf:"),
+                        React.createElement("div", { className: "flex gap-3" },
+                            React.createElement("span", null,
+                                "\uD83C\uDF54 ",
+                                totalNeeds.food.toFixed(1)),
+                            React.createElement("span", null,
+                                "\uD83C\uDF3E ",
+                                totalNeeds.feed.toFixed(1)),
+                            React.createElement("span", null,
+                                "\uD83D\uDCA7 ",
+                                totalNeeds.water.toFixed(1)))),
+                    React.createElement("div", { className: "flex justify-between items-center" },
+                        React.createElement("span", { className: "text-muted" }, "Vorrat:"),
+                        React.createElement("div", { className: "flex gap-3" },
+                            React.createElement("span", { className: totalStored.food < totalNeeds.food ? 'text-bad font-bold' : '' },
+                                "\uD83C\uDF54 ",
+                                totalStored.food.toFixed(1)),
+                            React.createElement("span", { className: totalStored.feed < totalNeeds.feed ? 'text-bad font-bold' : '' },
+                                "\uD83C\uDF3E ",
+                                totalStored.feed.toFixed(1)),
+                            React.createElement("span", { className: totalStored.water < totalNeeds.water ? 'text-bad font-bold' : '' },
+                                "\uD83D\uDCA7 ",
+                                totalStored.water.toFixed(1))))),
+                React.createElement("button", { onClick: openRat, disabled: creatures.length === 0, className: "w-full bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold py-3 rounded-lg" }, "Tagesration verbrauchen"),
+                lastSS && React.createElement("button", { onClick: undo, className: "w-full mt-2 text-muted text-sm hover:text-white transition-colors" }, "Widerrufen"))),
+        React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg h-fit" },
+            React.createElement("div", { className: "flex justify-between items-center mb-4" },
+                React.createElement("h3", { className: "text-xl font-bold" }, "Lager & Vorr\u00E4te"),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: startFor, className: "text-xs bg-green-700 text-white px-2 py-1 rounded" }, "\uD83C\uDF3F Suchen"),
+                    React.createElement("button", { onClick: addS, className: "text-xs bg-glass px-2 py-1 rounded border" }, "+ Lager"))),
+            React.createElement("div", { className: "space-y-3" }, storages.map((s, idx) => {
+                const cl = s.storageType === 'water' ? s.water : (s.food + (s.feed || 0) * FEED_WEIGHT_LB);
+                const full = cl >= s.maxCapacity;
+                return (React.createElement("div", { key: s.id, className: `bg-glass p-3 rounded-lg border ${!s.isActive ? 'opacity-50 grayscale' : ''}` },
+                    React.createElement("div", { className: "flex justify-between items-center mb-2" },
+                        React.createElement("div", { className: "flex items-center gap-2 flex-grow" },
+                            React.createElement(MoveButtons, { index: idx, length: storages.length, onMove: d => setStorages(prev => moveItem(prev, idx, d)) }),
+                            React.createElement("button", { onClick: () => updS(s.id, 'isActive', !s.isActive), className: `p-1 rounded text-[10px] border ${s.isActive ? 'text-good border-good/30' : 'text-muted'}` }, s.isActive ? 'Aktiv' : 'Inaktiv'),
+                            React.createElement("input", { className: "font-bold bg-transparent text-white outline-none w-full", value: s.name, onChange: e => updS(s.id, 'name', e.target.value) })),
+                        React.createElement("button", { onClick: () => remS(s.id), className: "text-muted" }, "\u00D7")),
+                    React.createElement("div", { className: "flex justify-between text-[10px] text-muted mb-1" },
+                        React.createElement("div", { className: "flex bg-input-bg rounded p-0.5" },
+                            React.createElement("button", { onClick: () => storTypeChange(s.id, 'food_feed'), className: `px-2 py-0.5 rounded ${s.storageType === 'food_feed' ? 'bg-accent text-bg-secondary font-bold' : ''}` }, "Essen"),
+                            React.createElement("button", { onClick: () => storTypeChange(s.id, 'water'), className: `px-2 py-0.5 rounded ${s.storageType === 'water' ? 'bg-accent text-bg-secondary font-bold' : ''}` }, "Wasser")),
+                        React.createElement("div", null,
+                            "Kap: ",
+                            React.createElement("input", { type: "number", step: "1", value: s.maxCapacity, onChange: e => numChange(s.id, 'maxCapacity', e.target.value, setStorages), className: "w-10 bg-transparent text-white text-right" }),
+                            " ",
+                            s.storageType === 'water' ? 'gal' : 'lb')),
+                    React.createElement("div", { className: "w-full bg-input-bg h-1 rounded-full overflow-hidden mb-3" },
+                        React.createElement("div", { className: `h-full ${full ? 'bg-bad' : 'bg-good'}`, style: { width: `${Math.min(100, (cl / s.maxCapacity) * 100)}%` } })),
+                    React.createElement("div", { className: "grid grid-cols-2 gap-2" }, s.storageType === 'food_feed' ? (React.createElement(React.Fragment, null,
+                        React.createElement("div", null,
+                            React.createElement("label", { className: "text-[10px] text-muted block" }, "Essen (lb)"),
+                            React.createElement("input", { type: "number", step: "1", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.food, onChange: e => numChange(s.id, 'food', e.target.value, setStorages) })),
+                        React.createElement("div", null,
+                            React.createElement("label", { className: "text-[10px] text-muted block" }, "Futter (Unit)"),
+                            React.createElement("input", { type: "number", step: "1", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.feed || 0, onChange: e => numChange(s.id, 'feed', e.target.value, setStorages) })))) : (React.createElement("div", { className: "col-span-2" },
+                        React.createElement("label", { className: "text-[10px] text-muted block" }, "Wasser (gal)"),
+                        React.createElement("input", { type: "number", step: "1", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.water, onChange: e => numChange(s.id, 'water', e.target.value, setStorages) }))))));
+            })))));
+};
+
+// ==========================================
+// JOURNEY / DISTANCE TRACKER
+// ==========================================
+const JourneyProgressBar = ({ current, total }) => {
+    const pct = total > 0 ? Math.min(100, Math.max(0, (current / total) * 100)) : 0;
+    return (React.createElement("div", { className: "w-full relative pt-7 pb-3" },
+        React.createElement("div", { className: "flex justify-between mb-1 text-xs font-bold text-muted" },
+            React.createElement("span", null, "Start"),
+            React.createElement("span", null, "Ziel")),
+        React.createElement("div", { className: "h-7 bg-input-bg rounded-full border border-border-color relative overflow-hidden shadow-inner" },
+            React.createElement("div", { className: "h-full bg-gradient-to-r from-accent to-sky-500 transition-all duration-500 ease-out flex items-center justify-end pr-2", style: { width: `${pct}%` } }, pct > 7 && React.createElement("span", { className: "text-xs text-bg-secondary font-black" }, `${Math.round(pct)}%`)),
+            React.createElement("div", { className: "absolute top-0 bottom-0 left-1/4 w-px bg-white/10" }),
+            React.createElement("div", { className: "absolute top-0 bottom-0 left-2/4 w-px bg-white/10" }),
+            React.createElement("div", { className: "absolute top-0 bottom-0 left-3/4 w-px bg-white/10" })),
+        React.createElement("div", { className: "absolute top-5 w-10 h-10 -ml-5 transition-all duration-500 ease-out flex items-center justify-center", style: { left: `${pct}%` } },
+            React.createElement("div", { className: "bg-card border-2 border-accent rounded-full p-1 shadow-lg text-xl" }, "♟️")),
+        React.createElement("div", { className: "text-center mt-3 text-lg text-white" },
+            React.createElement("span", { className: "font-bold" }, fmt(current)),
+            React.createElement("span", { className: "text-muted" }, " / "),
+            React.createElement("span", { className: "text-muted" }, fmt(total)),
+            React.createElement("span", { className: "text-muted text-sm" }, " Meilen"))));
+};
+const JourneyTracker = ({ journey, setJourney, settings, setSettings, onTravelHours, onLongRest, onResetJourney, onTravelRoll, onRestRoll, triggerModal }) => {
+    const e = React.createElement;
+    const setJ = (k, v) => setJourney(prev => ({ ...prev, [k]: v }));
+    const setS = (k, v) => setSettings(prev => ({ ...prev, [k]: v }));
+    const pace = settings.pace || 'normal';
+    const vehicle = settings.vehicle || 'no';
+    const speed = getSpeedInMph(pace, journey.baseSpeed);
+    const total = safeFloat(journey.totalDistance);
+    const traveled = safeFloat(journey.traveledDistance);
+    const remaining = Math.max(0, total - traveled);
+    const isFinished = remaining <= 0;
+    const hoursToday = safeFloat(journey.hoursTraveledToday);
+    const safeHours = Math.max(0, MAX_TRAVEL_HOURS - hoursToday);
+    const totalHoursNeeded = remaining > 0 && speed > 0 ? remaining / speed : 0;
+    const fullDays = Math.floor(totalHoursNeeded / MAX_TRAVEL_HOURS);
+    const leftoverHours = Math.ceil(totalHoursNeeded % MAX_TRAVEL_HOURS);
+    const normalDayHours = speed > 0 ? Math.min(safeHours, remaining / speed) : 0;
+    const setBaseSpeed = (raw) => {
+        let v = parseInt(raw, 10) || 0;
+        if (vehicle === 'yes' && v > 30)
+            v = 30;
+        setJ('baseSpeed', v);
+    };
+    const toggleVehicle = () => {
+        const nv = vehicle === 'yes' ? 'no' : 'yes';
+        setS('vehicle', nv);
+        if (nv === 'yes' && journey.baseSpeed > 30)
+            setJ('baseSpeed', 30);
+    };
+    const travelButton = (hours, label, cls, disabled = false) => e('button', { onClick: () => onTravelHours(hours), disabled: disabled || hours <= 0 || isFinished || speed <= 0, className: `w-full py-3 rounded-lg font-bold shadow-md transition-transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed ${cls}` }, label);
+    const paceButtons = [['slow', 'Langsam'], ['normal', 'Normal'], ['fast', 'Schnell']].map(([id, label]) => e('button', { key: id, onClick: () => setS('pace', id), className: `px-3 py-2 text-sm font-bold ${pace === id ? 'bg-accent text-bg-secondary' : 'bg-input-bg text-muted hover:text-white'}` },
+        e('div', null, label),
+        e('div', { className: 'font-mono text-xs opacity-80' }, fmt(getSpeedInMph(id, journey.baseSpeed)), ' mph')));
+    const actions = isFinished ? e('div', { className: 'space-y-2' },
+        e('div', { className: 'p-3 rounded-lg border border-good/40 bg-good/10 text-good font-bold text-center' }, 'Ziel erreicht.'),
+        e('button', { onClick: () => triggerModal('confirm', 'Neue Reise', 'Reisefortschritt zurücksetzen und neue Reise beginnen?', onResetJourney), className: 'w-full py-3 rounded-lg bg-good text-bg-secondary font-bold' }, 'Neue Reise starten')) : e('div', { className: 'space-y-2' },
+        travelButton(1, hoursToday >= MAX_TRAVEL_HOURS ? 'Forced March +1h' : '1 Stunde reisen', hoursToday >= MAX_TRAVEL_HOURS ? 'bg-red-900 text-white hover:bg-red-800' : 'bg-accent text-bg-secondary hover:opacity-90'),
+        travelButton(normalDayHours, 'Bis Tageslimit reisen', 'bg-sky-600 text-white hover:bg-sky-500', hoursToday >= MAX_TRAVEL_HOURS),
+        e('button', { onClick: onLongRest, className: 'w-full py-3 rounded-lg bg-glass border border-border-color text-muted font-bold hover:text-white' }, 'Long Rest / Neuer Tag'),
+        e('button', { onClick: () => triggerModal('confirm', 'Reise zurücksetzen', 'Nur Reisefortschritt zurücksetzen? Encounter-Matrix, Gruppe und Ressourcen bleiben erhalten.', onResetJourney), className: 'w-full py-2 rounded-lg text-xs text-muted hover:text-white' }, 'Reise zurücksetzen'));
+    return e('div', { className: 'grid grid-cols-1 xl:grid-cols-3 gap-4' },
+        e('section', { className: 'xl:col-span-2 bg-card rounded-xl p-4 shadow-lg border border-border-color' },
+            e('div', { className: 'flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-4' },
+                e('div', null,
+                    e('h2', { className: 'text-xl font-bold text-white' }, 'Reise & Strecke'),
+                    e('p', { className: 'text-sm text-muted' }, 'Zentraler Ablauf: Distanz buchen, Tagesstunden zählen, Forced March erkennen und optional direkt Encounter würfeln.')),
+                e('div', { className: 'flex gap-2' },
+                    e('button', { onClick: onTravelRoll, className: 'px-3 py-2 rounded-lg bg-glass border border-border-color text-sm text-muted hover:text-white' }, 'Nur Travel Roll'),
+                    e('button', { onClick: onRestRoll, className: 'px-3 py-2 rounded-lg bg-glass border border-border-color text-sm text-muted hover:text-white' }, 'Nur Nachtwurf'))),
+            e('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-4 mb-5' },
+                e('div', null,
+                    e('label', { className: 'block text-sm text-muted mb-1' }, 'Reise-Name / Ziel'),
+                    e('input', { value: journey.name || '', onChange: ev => setJ('name', ev.target.value), className: 'w-full p-2 rounded-lg border border-border-color bg-input-bg text-white', placeholder: 'z.B. Elturel → Triel' })),
+                e('div', { className: 'grid grid-cols-2 gap-3' },
+                    e('div', null,
+                        e('label', { className: 'block text-sm text-muted mb-1' }, 'Gesamtstrecke (Meilen)'),
+                        e('input', { type: 'number', min: '0', step: '1', value: journey.totalDistance, onChange: ev => setJ('totalDistance', safeFloat(ev.target.value)), className: 'w-full p-2 rounded-lg border border-border-color bg-input-bg text-white font-mono' })),
+                    e('div', null,
+                        e('label', { className: 'block text-sm text-muted mb-1' }, 'Gereist (Meilen)'),
+                        e('input', { type: 'number', min: '0', step: '0.5', value: journey.traveledDistance, onChange: ev => setJ('traveledDistance', safeFloat(ev.target.value)), className: 'w-full p-2 rounded-lg border border-border-color bg-input-bg text-white font-mono' })))),
+            e(JourneyProgressBar, { current: traveled, total: total }),
+            e('div', { className: 'grid grid-cols-1 md:grid-cols-4 gap-3 mt-5' },
+                e(TerrainSelect, { value: settings.terrain, onChange: v => setS('terrain', v) }),
+                e(LightingSelect, { value: settings.travelLighting || 'bright', onChange: v => setS('travelLighting', v) }),
+                e('div', null,
+                    e('label', { className: 'block text-sm text-muted mb-1' }, 'Base Speed (ft)'),
+                    e('input', { type: 'number', min: '1', step: '1', value: journey.baseSpeed, onChange: ev => setBaseSpeed(ev.target.value), className: 'w-full p-2 rounded-lg border border-border-color bg-input-bg text-white font-mono' })),
+                e('div', null,
+                    e('label', { className: 'block text-sm text-muted mb-1' }, 'Fahrzeug'),
+                    e('button', { onClick: toggleVehicle, className: `w-full p-2 rounded-lg border font-bold ${vehicle === 'yes' ? 'bg-accent text-bg-secondary border-accent' : 'bg-input-bg text-muted border-border-color hover:text-white'}` }, vehicle === 'yes' ? '🐎 Fahrzeug aktiv' : 'Kein Fahrzeug'))),
+            e('div', { className: 'mt-4' },
+                e('label', { className: 'block text-sm text-muted mb-1' }, 'Reisetempo'),
+                e('div', { className: 'grid grid-cols-3 rounded-lg overflow-hidden border border-border-color' }, paceButtons),
+                e('p', { className: 'text-xs text-muted mt-2 bg-glass p-2 rounded-lg border border-border-color' }, PACE_EFFECTS[pace])),
+            e('div', { className: 'mt-4 grid grid-cols-1 md:grid-cols-2 gap-3' },
+                e('label', { className: 'flex items-center gap-2 bg-glass border border-border-color rounded-lg p-3 text-sm text-muted' },
+                    e('input', { type: 'checkbox', checked: !!journey.autoEncounter, onChange: ev => setJ('autoEncounter', ev.target.checked) }),
+                    e('span', null, 'Beim Reisen automatisch Travel Encounter würfeln')),
+                e('label', { className: 'flex items-center gap-2 bg-glass border border-border-color rounded-lg p-3 text-sm text-muted' },
+                    e('input', { type: 'checkbox', checked: !!journey.autoNightEncounter, onChange: ev => setJ('autoNightEncounter', ev.target.checked) }),
+                    e('span', null, 'Bei Long Rest automatisch Nachtbegegnung würfeln')))),
+        e('aside', { className: 'bg-card rounded-xl p-4 shadow-lg border border-border-color h-fit' },
+            e('div', { className: 'text-center border-b border-border-color pb-3 mb-4' },
+                e('div', { className: 'text-3xl font-black text-white' }, 'Tag ', journey.day),
+                e('div', { className: 'text-sm uppercase tracking-widest text-muted' }, 'Stunde ', fmt(hoursToday))),
+            e('div', { className: 'space-y-3 text-sm mb-4' },
+                e('div', { className: 'flex justify-between' }, e('span', { className: 'text-muted' }, 'Tempo'), e('strong', null, fmt(speed), ' mph')),
+                e('div', { className: 'flex justify-between' }, e('span', { className: 'text-muted' }, 'Reststrecke'), e('strong', null, fmt(remaining), ' mi')),
+                e('div', { className: 'flex justify-between' }, e('span', { className: 'text-muted' }, 'Sichere Stunden'), e('strong', { className: safeHours <= 0 ? 'text-bad' : 'text-good' }, fmt(safeHours))),
+                !isFinished && e('div', { className: 'bg-glass rounded-lg p-3 border border-border-color' },
+                    e('div', { className: 'text-muted text-xs' }, 'Geschätzte Ankunft'),
+                    e('div', { className: 'font-mono text-white' }, '~ ', fullDays, ' Tage, ', leftoverHours, ' Std.'))),
+            actions));
+};
+
+// ==========================================
+// SAVE MANAGER
+// ==========================================
+const SAVE_INDEX_KEY = 'enc_saves_index';
+const SAVE_DATA_PREFIX = 'enc_save_';
+const ACTIVE_SAVE_KEY = 'enc_active_save';
+const DEFAULT_GAME_STATE = {
+    settings: { terrain: 'road', pace: 'normal', vehicle: 'no', travelLighting: 'bright', watchCount: 3, lightHoursOverride: null, watches: [{ name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' }, { name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' }, { name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' }] },
+    journey: { name: 'Neue Reise', totalDistance: 100, traveledDistance: 0, baseSpeed: 30, day: 1, hoursTraveledToday: 0, autoEncounter: true, autoNightEncounter: true },
+    party: [{ id: '1', name: 'Charakter 1', pp: 14, vision: 'none' }, { id: '2', name: 'Charakter 2', pp: 12, vision: 'none' }],
+    matrix: JSON.parse(JSON.stringify(DEFAULTS)),
+    creatures: [{ id: '1', name: 'Pferd', size: 'Large', usesFeed: true, conMod: 2, daysWithoutFood: 0, exhaustion: 0 }, { id: '2', name: 'Abenteurer', size: 'Medium', usesFeed: false, conMod: 1, daysWithoutFood: 0, exhaustion: 0 }],
+    storages: [{ id: '1', name: 'Wagen', isActive: true, storageType: 'food_feed', maxCapacity: 200, food: 50, water: 20, feed: 7 }]
+};
+const getSaveIndex = () => { try {
+    return JSON.parse(localStorage.getItem(SAVE_INDEX_KEY)) || [];
+}
+catch (e) {
+    return [];
+} };
+const setSaveIndex = (idx) => localStorage.setItem(SAVE_INDEX_KEY, JSON.stringify(idx));
+const getSaveData = (id) => { try {
+    return JSON.parse(localStorage.getItem(SAVE_DATA_PREFIX + id));
+}
+catch (e) {
+    return null;
+} };
+const setSaveData = (id, data) => localStorage.setItem(SAVE_DATA_PREFIX + id, JSON.stringify(data));
+const deleteSaveData = (id) => localStorage.removeItem(SAVE_DATA_PREFIX + id);
+const getActiveSaveId = () => localStorage.getItem(ACTIVE_SAVE_KEY);
+const setActiveSaveId = (id) => localStorage.setItem(ACTIVE_SAVE_KEY, id);
+const SaveManager = ({ isOpen, onClose, currentState, onLoadState, triggerModal }) => {
+    const [saves, setSaves] = useState([]);
+    const [renamingId, setRenamingId] = useState(null);
+    const [renameValue, setRenameValue] = useState('');
+    const fileInputRef = useRef(null);
+    useEffect(() => { if (isOpen)
+        setSaves(getSaveIndex()); }, [isOpen]);
+    const activeSaveId = getActiveSaveId();
+    // Always flush current state to active save before any read operation
+    const flushActiveSave = () => {
+        const activeId = getActiveSaveId();
+        if (activeId) {
+            const state = currentState();
+            setSaveData(activeId, state);
+        }
+    };
+    const handleNewSave = () => {
+        const id = generateId();
+        const name = `Spielstand ${saves.length + 1}`;
+        const entry = { id, name, timestamp: Date.now() };
+        const state = currentState();
+        const newIndex = [...saves, entry];
+        setSaveIndex(newIndex);
+        setSaveData(id, state);
+        setActiveSaveId(id);
+        setSaves(newIndex);
+    };
+    const handleOverwrite = (id) => {
+        triggerModal('confirm', 'Überschreiben', 'Diesen Spielstand mit dem aktuellen Stand überschreiben?', () => {
+            const state = currentState();
+            setSaveData(id, state);
+            const newIndex = saves.map(s => s.id === id ? { ...s, timestamp: Date.now() } : s);
+            setSaveIndex(newIndex);
+            setSaves(newIndex);
+        });
+    };
+    const handleLoad = (id) => {
+        triggerModal('confirm', 'Laden', 'Aktuellen Stand verwerfen und diesen Spielstand laden?', () => {
+            const data = getSaveData(id);
+            if (!data)
+                return triggerModal('alert', 'Fehler', 'Spielstand konnte nicht geladen werden.');
+            setActiveSaveId(id);
+            onLoadState(data);
+            onClose();
+        });
+    };
+    const handleDelete = (id, name) => {
+        triggerModal('confirm', 'Löschen', `Spielstand "${name}" wirklich löschen? Dies kann nicht rückgängig gemacht werden.`, () => {
+            deleteSaveData(id);
+            const newIndex = saves.filter(s => s.id !== id);
+            setSaveIndex(newIndex);
+            setSaves(newIndex);
+            if (activeSaveId === id)
+                setActiveSaveId('');
+        });
+    };
+    const startRename = (id, currentName) => { setRenamingId(id); setRenameValue(currentName); };
+    const confirmRename = () => {
+        if (!renameValue.trim())
+            return;
+        const newIndex = saves.map(s => s.id === renamingId ? { ...s, name: renameValue.trim() } : s);
+        setSaveIndex(newIndex);
+        setSaves(newIndex);
+        setRenamingId(null);
+    };
+    const handleExport = (id, name) => {
+        // For active save, use live state instead of potentially stale localStorage
+        const activeId = getActiveSaveId();
+        const data = (id === activeId) ? currentState() : getSaveData(id);
+        if (!data)
+            return triggerModal('alert', 'Fehler', 'Spielstand enthält keine Daten.');
+        const blob = new Blob([JSON.stringify({ name, version: 3, data }, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${name.replace(/[^a-zA-Z0-9äöüÄÖÜß_-]/g, '_')}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+    const handleExportAll = () => {
+        // Flush active save first so localStorage is current
+        flushActiveSave();
+        const allData = saves.map(s => {
+            const activeId = getActiveSaveId();
+            const data = (s.id === activeId) ? currentState() : getSaveData(s.id);
+            return { ...s, data };
+        }).filter(s => s.data);
+        if (!allData.length)
+            return triggerModal('alert', 'Leer', 'Keine Spielstände zum Exportieren.');
+        const blob = new Blob([JSON.stringify({ version: 3, saves: allData }, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `alle_spielstaende_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+    const handleImport = (e) => {
+        const file = e.target.files?.[0];
+        if (!file)
+            return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const parsed = JSON.parse(ev.target.result);
+                let imported = [];
+                if (parsed.saves && Array.isArray(parsed.saves)) {
+                    imported = parsed.saves;
+                }
+                else if (parsed.data && parsed.name) {
+                    imported = [{ id: generateId(), name: parsed.name, timestamp: Date.now(), data: parsed.data }];
+                }
+                else if (parsed.settings || parsed.party || parsed.matrix) {
+                    imported = [{ id: generateId(), name: file.name.replace('.json', ''), timestamp: Date.now(), data: parsed }];
+                }
+                else {
+                    return triggerModal('alert', 'Fehler', 'Dateiformat nicht erkannt.');
+                }
+                let count = 0;
+                let firstImportedId = null;
+                let firstImportedData = null;
+                const newIndex = [...saves];
+                imported.forEach(imp => {
+                    if (!imp.data)
+                        return;
+                    const id = generateId();
+                    const name = imp.name || `Import ${saves.length + count + 1}`;
+                    setSaveData(id, imp.data);
+                    newIndex.push({ id, name, timestamp: imp.timestamp || Date.now() });
+                    if (!firstImportedId) {
+                        firstImportedId = id;
+                        firstImportedData = imp.data;
+                    }
+                    count++;
+                });
+                setSaveIndex(newIndex);
+                setSaves(newIndex);
+                // Auto-load the first imported save
+                if (firstImportedId && firstImportedData) {
+                    setActiveSaveId(firstImportedId);
+                    onLoadState(firstImportedData);
+                    onClose();
+                }
+                triggerModal('alert', 'Importiert & Geladen', `${count} Spielstand${count !== 1 ? 'e' : ''} importiert. ${count === 1 ? 'Spielstand wurde automatisch geladen.' : 'Der erste Spielstand wurde automatisch geladen.'}`);
+            }
+            catch (err) {
+                triggerModal('alert', 'Fehler', 'Datei konnte nicht gelesen werden: ' + err.message);
+            }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+    };
+    if (!isOpen)
+        return null;
+    return (React.createElement("div", { className: "fixed inset-0 z-[90] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" },
+        React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-2xl w-full p-6 flex flex-col max-h-[90vh]" },
+            React.createElement("div", { className: "flex justify-between items-center mb-4" },
+                React.createElement("h3", { className: "text-xl font-bold text-white" }, "\uD83D\uDCBE Spielst\u00E4nde verwalten"),
+                React.createElement("button", { onClick: onClose, className: "text-muted hover:text-white text-xl" }, "\u00D7")),
+            React.createElement("div", { className: "flex gap-2 mb-4" },
+                React.createElement("button", { onClick: handleNewSave, className: "bg-accent text-bg-secondary font-bold px-4 py-2 rounded-lg text-sm hover:opacity-90" }, "+ Neuer Spielstand"),
+                React.createElement("button", { onClick: () => fileInputRef.current?.click(), className: "bg-glass border border-border-color text-muted px-4 py-2 rounded-lg text-sm hover:text-white hover:bg-input-bg transition-colors" }, "\uD83D\uDCE5 Importieren"),
+                saves.length > 0 && React.createElement("button", { onClick: handleExportAll, className: "bg-glass border border-border-color text-muted px-4 py-2 rounded-lg text-sm hover:text-white hover:bg-input-bg transition-colors" }, "\uD83D\uDCE6 Alle exportieren"),
+                React.createElement("input", { ref: fileInputRef, type: "file", accept: ".json", onChange: handleImport, className: "hidden" })),
+            React.createElement("div", { className: "overflow-y-auto flex-grow mb-4 space-y-2" },
+                saves.length === 0 && React.createElement("div", { className: "text-center text-muted py-8" }, "Keine Spielst\u00E4nde vorhanden. Erstelle einen neuen oder importiere eine Datei."),
+                saves.map(s => {
+                    const isActive = s.id === activeSaveId;
+                    const date = new Date(s.timestamp);
+                    return (React.createElement("div", { key: s.id, className: `p-3 rounded-lg border transition-colors ${isActive ? 'bg-accent/10 border-accent/30' : 'bg-glass border-border-color'}` },
+                        React.createElement("div", { className: "flex justify-between items-center mb-2" },
+                            React.createElement("div", { className: "flex items-center gap-2 flex-grow min-w-0" },
+                                isActive && React.createElement("span", { className: "text-[10px] bg-accent text-bg-secondary font-bold px-1.5 py-0.5 rounded shrink-0" }, "AKTIV"),
+                                renamingId === s.id ? (React.createElement("div", { className: "flex gap-2 flex-grow" },
+                                    React.createElement("input", { autoFocus: true, value: renameValue, onChange: e => setRenameValue(e.target.value), onKeyDown: e => e.key === 'Enter' && confirmRename(), className: "flex-grow bg-input-bg rounded p-1 text-sm text-white border border-border-color" }),
+                                    React.createElement("button", { onClick: confirmRename, className: "text-good text-sm font-bold" }, "\u2713"),
+                                    React.createElement("button", { onClick: () => setRenamingId(null), className: "text-muted text-sm" }, "\u2717"))) : (React.createElement("span", { className: "font-bold text-white truncate" }, s.name))),
+                            React.createElement("span", { className: "text-xs text-muted ml-2 shrink-0" },
+                                date.toLocaleDateString('de-DE'),
+                                " ",
+                                date.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }))),
+                        React.createElement("div", { className: "flex gap-2 flex-wrap" },
+                            React.createElement("button", { onClick: () => handleLoad(s.id), className: "text-xs bg-accent/20 text-accent px-2 py-1 rounded hover:bg-accent/30 transition-colors" }, "\uD83D\uDCC2 Laden"),
+                            React.createElement("button", { onClick: () => handleOverwrite(s.id), className: "text-xs bg-glass text-muted px-2 py-1 rounded border border-border-color hover:text-white transition-colors" }, "\uD83D\uDCBE \u00DCberschreiben"),
+                            React.createElement("button", { onClick: () => startRename(s.id, s.name), className: "text-xs bg-glass text-muted px-2 py-1 rounded border border-border-color hover:text-white transition-colors" }, "\u270F\uFE0F Umbenennen"),
+                            React.createElement("button", { onClick: () => handleExport(s.id, s.name), className: "text-xs bg-glass text-muted px-2 py-1 rounded border border-border-color hover:text-white transition-colors" }, "\uD83D\uDCE4 Exportieren"),
+                            React.createElement("button", { onClick: () => handleDelete(s.id, s.name), className: "text-xs bg-bad/10 text-bad px-2 py-1 rounded border border-bad/30 hover:bg-bad/20 transition-colors" }, "\uD83D\uDDD1\uFE0F L\u00F6schen"))));
+                })),
+            React.createElement("button", { onClick: onClose, className: "w-full bg-glass border border-border-color text-muted font-bold py-2 rounded-lg hover:text-white hover:bg-input-bg transition-colors" }, "Schlie\u00DFen"))));
+};
+// ==========================================
+// MAIN APP
+// ==========================================
+const App = () => {
+    const [tab, setTab] = useState('journey');
+    const [log, setLog] = useState([]);
+    const [result, setResult] = useState('Bereit — wähle einen Tab und starte einen Wurf.');
+    const [resultType, setResultType] = useState('info');
+    const [flow, setFlow] = useState(null);
+    const [modal, setModal] = useState({ isOpen: false, type: 'alert', title: '', message: '' });
+    const [saveManagerOpen, setSaveManagerOpen] = useState(false);
+    const tm = (type, title, msg, onConfirm) => setModal({ isOpen: true, type, title, message: msg, onConfirm });
+    // Load initial state: from active save slot, or defaults
+    const loadInitial = () => {
+        const activeId = getActiveSaveId();
+        if (activeId) {
+            const data = getSaveData(activeId);
+            if (data)
+                return data;
+        }
+        return JSON.parse(JSON.stringify(DEFAULT_GAME_STATE));
+    };
+    const [initialData] = useState(loadInitial);
+    const [settings, setSettings] = useState(initialData.settings);
+    const [journey, setJourney] = useState(initialData.journey || DEFAULT_GAME_STATE.journey);
+    const [party, setParty] = useState(initialData.party);
+    const [matrix, setMatrix] = useState(initialData.matrix);
+    const [creatures, setCreatures] = useState(initialData.creatures);
+    const [storages, setStorages] = useState(initialData.storages);
+    // Use ref so SaveManager always gets the absolute latest state (no stale closures)
+    const stateRef = useRef({ settings, journey, party, matrix, creatures, storages });
+    useEffect(() => {
+        stateRef.current = { settings, journey, party, matrix, creatures, storages };
+        // Auto-save to active slot
+        const activeId = getActiveSaveId();
+        if (activeId) {
+            setSaveData(activeId, stateRef.current);
+        }
+    }, [settings, journey, party, matrix, creatures, storages]);
+    const getCurrentState = () => stateRef.current;
+    const loadState = (data) => {
+        const s = data.settings || DEFAULT_GAME_STATE.settings;
+        const j = data.journey || DEFAULT_GAME_STATE.journey;
+        const p = data.party || DEFAULT_GAME_STATE.party;
+        const m = data.matrix || JSON.parse(JSON.stringify(DEFAULTS));
+        const c = data.creatures || DEFAULT_GAME_STATE.creatures;
+        const st = data.storages || DEFAULT_GAME_STATE.storages;
+        setSettings(s);
+        setJourney(j);
+        setParty(p);
+        setMatrix(m);
+        setCreatures(c);
+        setStorages(st);
+        stateRef.current = { settings: s, journey: j, party: p, matrix: m, creatures: c, storages: st };
+        setFlow(null);
+        setLog([]);
+        setResult('Spielstand geladen.');
+        setResultType('info');
+    };
+    const activeSaveName = useMemo(() => {
+        const id = getActiveSaveId();
+        if (!id)
+            return null;
+        const idx = getSaveIndex();
+        const s = idx.find(s => s.id === id);
+        return s?.name || null;
+    }, [saveManagerOpen, settings, journey]);
+    const addLog = (msg) => setLog(prev => [`${new Date().toLocaleTimeString()} — ${msg}`, ...prev]);
+    const resetLog = () => { setLog([]); setResult('Log geleert.'); setResultType('info'); setFlow(null); };
+    const resetAll = () => tm('confirm', 'Alles zurücksetzen', 'Alle Einstellungen auf Standard zurücksetzen?', () => {
+        loadState(JSON.parse(JSON.stringify(DEFAULT_GAME_STATE)));
+    });
+    const handleTravel = (shouldReset = true) => {
+        if (shouldReset)
+            resetLog();
+        else
+            setFlow(null);
+        const tn = TERRAIN_MAP[settings.terrain], ranges = matrix.day[tn];
+        const pl = settings.pace === 'fast' ? 'Schnell' : settings.pace === 'slow' ? 'Langsam' : 'Normal';
+        const tl = settings.travelLighting || 'bright';
+        const tlLabel = LIGHTING_OPTIONS.find(o => o.value === tl)?.short || tl;
+        addLog(`Travel Encounter: "${tn}" | Licht: ${tlLabel} | Tempo: ${pl} | Fahrzeug: ${settings.vehicle === 'yes' ? 'Ja' : 'Nein'}`);
+        addLog(`Ranges: H ${ranges.hostile[0]}-${ranges.hostile[1]}, N ${ranges.neutral[0]}-${ranges.neutral[1]}, POI ${ranges.poi[0]}-${ranges.poi[1]}`);
+        const d = rnd(100);
+        let et = null;
+        if (d >= ranges.hostile[0] && d <= ranges.hostile[1])
+            et = 'hostile';
+        else if (d >= ranges.neutral[0] && d <= ranges.neutral[1])
+            et = 'neutral';
+        else if (d >= ranges.poi[0] && d <= ranges.poi[1])
+            et = 'poi';
+        addLog(`d100 → ${d} → ${et ? et.toUpperCase() : 'Keine Begegnung'}`);
+        if (!et) {
+            setResult(`Keine Begegnung. (d100: ${d})`);
+            setResultType('none');
+            return;
+        }
+        setResult(`Encounter: ${et.toUpperCase()} (d100: ${d})`);
+        setResultType(et);
+        if (et !== 'poi') {
+            addLog('Starte Stealth/Detection-Flow...');
+            setFlow({ step: 'enemyStealthChoice', context: 'day', encounterType: et, d, vehicle: settings.vehicle === 'yes' });
+        }
+        else
+            addLog('POI gefunden — kein Kampf-Flow.');
+    };
+    const handleRest = (shouldReset = true) => {
+        if (shouldReset)
+            resetLog();
+        else
+            setFlow(null);
+        const tn = TERRAIN_MAP[settings.terrain], ni = matrix.night[tn];
+        const bt = ni.basis[1];
+        const autoLH = settings.watches.length ? Math.round(settings.watches.filter(w => w.hasLight).length * (8 / settings.watches.length) * 10) / 10 : 0;
+        const eLH = settings.lightHoursOverride != null && settings.lightHoursOverride !== '' ? (parseFloat(settings.lightHoursOverride) || 0) : autoLH;
+        const lb = eLH * ni.light, thr = bt + lb;
+        const d = rnd(100);
+        addLog(`Long Rest Encounter: "${tn}"`);
+        addLog(`Schwelle: ${bt} + ${eLH}h × ${ni.light} = ${thr} → Encounter bei 1-${thr}`);
+        addLog(`d100 → ${d}`);
+        if (d > thr) {
+            setResult(`Keine Begegnung. (d100: ${d}, Schwelle: ${thr})`);
+            setResultType('none');
+            addLog('Keine Begegnung.');
+            return;
+        }
+        setResultType('hostile');
+        const wr = rnd(settings.watches.length), aw = settings.watches[wr - 1];
+        addLog(`Encounter! Wache ${wr}: ${aw.name || 'Unbenannt'}`);
+        const watchLighting = aw.hasLight ? 'bright' : (aw.lighting || 'darkness');
+        const watchLightLabel = LIGHTING_OPTIONS.find(o => o.value === watchLighting)?.short || watchLighting;
+        const vm = getVisionMod(watchLighting, aw.vision);
+        const ep = aw.pp + vm.mod;
+        addLog(`Umgebung: ${aw.hasLight ? '🔥 Eigenes Licht → Bright' : watchLightLabel} | ${VISION_NAMES[aw.vision]} → ${vm.label}`);
+        addLog(`Passive Perception: ${aw.pp} ${vm.mod !== 0 ? vm.mod : ''} = ${ep}`);
+        setResult(`Long Rest Encounter! Wache ${wr}: ${aw.name || 'Unbenannt'} (Eff. Passive Perception: ${ep})`);
+        setFlow({ step: 'nightEncounterInfo', context: 'night', encounterType: 'hostile', d, affectedWatch: aw, watchHasLight: aw.hasLight, watchLighting, watchPerception: { effectivePP: ep, modifier: vm.label } });
+    };
+    const handleJourneyTravel = (hours) => {
+        const h = Math.max(0, safeFloat(hours));
+        if (!h)
+            return;
+        const speed = getSpeedInMph(settings.pace || 'normal', journey.baseSpeed);
+        if (speed <= 0)
+            return tm('alert', 'Keine Geschwindigkeit', 'Base Speed muss größer als 0 sein.');
+        const remaining = Math.max(0, safeFloat(journey.totalDistance) - safeFloat(journey.traveledDistance));
+        const actualHours = Math.min(h, remaining / speed || h);
+        const distance = actualHours * speed;
+        const newHours = safeFloat(journey.hoursTraveledToday) + actualHours;
+        const isForced = newHours > MAX_TRAVEL_HOURS;
+        const dc = isForced ? FORCED_MARCH_BASE_DC + Math.ceil(newHours - MAX_TRAVEL_HOURS) : null;
+        setJourney(prev => ({ ...prev, traveledDistance: Math.min(safeFloat(prev.totalDistance), safeFloat(prev.traveledDistance) + distance), hoursTraveledToday: newHours }));
+        setResult(`${fmt(distance)} Meilen gereist (${fmt(actualHours)}h, ${fmt(speed)} mph).${isForced ? ` Forced March: CON Save DC ${dc}.` : ''}`);
+        setResultType(isForced ? 'hostile' : 'info');
+        addLog(`Reise: ${fmt(actualHours)}h × ${fmt(speed)} mph = ${fmt(distance)} mi${isForced ? ` | Forced March DC ${dc}` : ''}`);
+        if (journey.autoEncounter)
+            handleTravel(false);
+    };
+    const handleJourneyLongRest = () => {
+        setJourney(prev => ({ ...prev, day: safeFloat(prev.day) + 1, hoursTraveledToday: 0 }));
+        addLog(`Long Rest: Tag ${journey.day} endet. Neuer Tag: ${safeFloat(journey.day) + 1}.`);
+        setResult(`Long Rest abgeschlossen. Tag ${safeFloat(journey.day) + 1} beginnt.`);
+        setResultType('info');
+        if (journey.autoNightEncounter)
+            handleRest(false);
+    };
+    const resetJourneyOnly = () => {
+        setJourney(prev => ({ ...DEFAULT_GAME_STATE.journey, name: prev.name || DEFAULT_GAME_STATE.journey.name, baseSpeed: prev.baseSpeed || 30, autoEncounter: prev.autoEncounter, autoNightEncounter: prev.autoNightEncounter }));
+        setFlow(null);
+        setResult('Reise zurückgesetzt. Gruppe, Matrix und Ressourcen wurden nicht verändert.');
+        setResultType('info');
+        addLog('Reise zurückgesetzt.');
+    };
+    return (React.createElement("main", { className: "min-h-screen p-4 md:p-7 pb-20" },
+        React.createElement(Modal, { config: modal, onClose: () => setModal({ ...modal, isOpen: false }) }),
+        React.createElement(SaveManager, { isOpen: saveManagerOpen, onClose: () => setSaveManagerOpen(false), currentState: getCurrentState, onLoadState: loadState, triggerModal: tm }),
+        React.createElement("div", { className: "max-w-7xl mx-auto" },
+            React.createElement("header", { className: "mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3" },
+                React.createElement("div", { className: "flex items-center gap-3" },
+                    React.createElement("h1", { className: "text-2xl font-bold" }, "Overland Travel Manager"),
+                    React.createElement("button", { onClick: () => setSaveManagerOpen(true), className: "flex items-center gap-1.5 bg-glass border border-border-color text-muted px-3 py-1.5 rounded-lg text-sm hover:text-white hover:bg-input-bg transition-colors", title: "Spielst\u00E4nde verwalten" },
+                        "\uD83D\uDCBE ",
+                        activeSaveName ? React.createElement("span", { className: "text-accent font-medium max-w-[120px] truncate" }, activeSaveName) : React.createElement("span", null, "Speichern"))),
+                React.createElement("div", { className: "flex bg-card p-1 rounded-lg border border-border-color" }, [{ id: 'journey', l: '🧭 Reise' }, { id: 'day', l: '🗺️ Encounter' }, { id: 'night', l: '⛺ Long Rest' }, { id: 'resources', l: '🍎 Ressourcen' }].map(t => React.createElement("button", { key: t.id, onClick: () => setTab(t.id), className: `px-4 py-2 rounded-md text-sm font-bold transition-colors ${tab === t.id ? 'bg-accent text-bg-secondary' : 'text-muted hover:text-white'}` }, t.l)))),
+            tab === 'journey' && (React.createElement(React.Fragment, null,
+                React.createElement("div", { className: "grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4" },
+                    React.createElement("div", { className: "lg:col-span-2" },
+                        React.createElement(JourneyTracker, { journey: journey, setJourney: setJourney, settings: settings, setSettings: setSettings, onTravelHours: handleJourneyTravel, onLongRest: handleJourneyLongRest, onResetJourney: resetJourneyOnly, onTravelRoll: () => handleTravel(true), onRestRoll: () => handleRest(true), triggerModal: tm })),
+                    React.createElement(LogCard, { log: log, result: result, resultType: resultType, onResetLog: resetLog })),
+                flow && React.createElement(FlowPanels, { flowState: flow, setFlowState: setFlow, setResult: setResult, setResultType: setResultType, addLog: addLog, triggerModal: tm, settings: settings, partyMembers: party }))),
+            tab === 'day' && (React.createElement(React.Fragment, null,
+                React.createElement("div", { className: "grid grid-cols-1 lg:grid-cols-3 gap-4" },
+                    React.createElement("div", { className: "lg:col-span-2" },
+                        React.createElement(DaySettingsCard, { settings: settings, setSettings: setSettings, partyMembers: party, setPartyMembers: setParty, onTravelRoll: handleTravel, onResetAll: resetAll, triggerModal: tm })),
+                    React.createElement(LogCard, { log: log, result: result, resultType: resultType, onResetLog: resetLog })),
+                flow && React.createElement(FlowPanels, { flowState: flow, setFlowState: setFlow, setResult: setResult, setResultType: setResultType, addLog: addLog, triggerModal: tm, settings: settings, partyMembers: party }),
+                React.createElement(MatrixEditor, { matrix: matrix, setMatrix: setMatrix, addLog: addLog, triggerModal: tm, mode: "day" }))),
+            tab === 'night' && (React.createElement(React.Fragment, null,
+                React.createElement("div", { className: "grid grid-cols-1 lg:grid-cols-3 gap-4" },
+                    React.createElement("div", { className: "lg:col-span-2" },
+                        React.createElement(NightSettingsCard, { settings: settings, setSettings: setSettings, onRestRoll: handleRest, triggerModal: tm })),
+                    React.createElement(LogCard, { log: log, result: result, resultType: resultType, onResetLog: resetLog })),
+                flow && React.createElement(FlowPanels, { flowState: flow, setFlowState: setFlow, setResult: setResult, setResultType: setResultType, addLog: addLog, triggerModal: tm, settings: settings, partyMembers: party }),
+                React.createElement(MatrixEditor, { matrix: matrix, setMatrix: setMatrix, addLog: addLog, triggerModal: tm, mode: "night" }))),
+            tab === 'resources' && React.createElement(ResourceManager, { creatures: creatures, setCreatures: setCreatures, storages: storages, setStorages: setStorages, addLog: addLog, triggerModal: tm }))));
+};
+createRoot(document.getElementById('root')).render(React.createElement(React.StrictMode, null,
+    React.createElement(App, null)));
+
+</script>
+  </body>
+</html>
