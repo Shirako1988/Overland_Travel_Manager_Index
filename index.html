@@ -231,6 +231,67 @@ const getVisionMod = (lighting, vision) => {
         return { mod: -5, label: 'Darkness, DV: dark→dim (−5)' };
     return { mod: -5, label: 'Darkness, kein DV (−5)' };
 };
+
+const makeWatchMember = () => ({ name: '', vision: 'none', pp: 12 });
+const makeWatchShift = (durationHours = 2) => ({ durationHours, hasLight: false, lighting: 'darkness', members: [makeWatchMember()] });
+const normalizeWatchMember = (m = {}) => ({ name: m.name || '', vision: m.vision || 'none', pp: Math.max(1, parseInt(m.pp, 10) || 12) });
+const normalizeWatch = (w = {}, fallbackDuration = 2) => {
+    const members = Array.isArray(w.members) && w.members.length
+        ? w.members.map(normalizeWatchMember)
+        : [normalizeWatchMember({ name: w.name, vision: w.vision, pp: w.pp })];
+    return { durationHours: Math.max(0.25, safeFloat(w.durationHours ?? w.hours ?? fallbackDuration)), hasLight: !!w.hasLight, lighting: w.lighting || 'darkness', members };
+};
+const normalizeWatches = (watches) => {
+    if (!Array.isArray(watches)) return [makeWatchShift(8)];
+    const fallbackDuration = watches.length ? Math.round((8 / watches.length) * 10) / 10 : 2;
+    return watches.map(w => normalizeWatch(w, fallbackDuration));
+};
+const getLongRestHours = (settings = {}) => Math.max(0.25, safeFloat(settings.longRestHours ?? 8));
+const getWatchLighting = (watch) => watch?.hasLight ? 'bright' : (watch?.lighting || 'darkness');
+const getWatchMemberDetails = (watch) => {
+    const lighting = getWatchLighting(watch);
+    return (watch?.members || []).map((m, index) => {
+        const vm = getVisionMod(lighting, m.vision || 'none');
+        return { ...m, index, visionMod: vm.mod, visionLabel: vm.label, effectivePP: (parseInt(m.pp, 10) || 12) + vm.mod };
+    });
+};
+const getBestWatchMember = (watch) => {
+    const details = getWatchMemberDetails(watch);
+    return details.length ? details.reduce((best, m) => m.effectivePP > best.effectivePP ? m : best, details[0]) : null;
+};
+const getTotalWatchHours = (watches) => normalizeWatches(watches).reduce((sum, w) => sum + safeFloat(w.durationHours), 0);
+const getRestSegments = (watches, restHours = 8) => {
+    const normalized = normalizeWatches(watches);
+    const maxRest = Math.max(0.25, safeFloat(restHours));
+    const segments = [];
+    let cursor = 0;
+    normalized.forEach((w, i) => {
+        if (cursor >= maxRest) return;
+        const rawDuration = Math.max(0, safeFloat(w.durationHours));
+        if (rawDuration <= 0) return;
+        const duration = Math.min(rawDuration, maxRest - cursor);
+        if (duration <= 0) return;
+        segments.push({ type: 'watch', watch: w, index: i, duration, start: cursor, end: cursor + duration });
+        cursor += duration;
+    });
+    if (cursor < maxRest) {
+        segments.push({ type: 'unguarded', index: -1, duration: maxRest - cursor, start: cursor, end: maxRest });
+    }
+    return segments;
+};
+const getRestUnguardedHours = (watches, restHours = 8) => getRestSegments(watches, restHours).reduce((sum, seg) => sum + (seg.type === 'unguarded' ? seg.duration : 0), 0);
+const getRestLightHours = (watches, restHours = 8) => getRestSegments(watches, restHours).reduce((sum, seg) => sum + (seg.type === 'watch' && seg.watch?.hasLight ? seg.duration : 0), 0);
+const chooseWeightedRestSegment = (watches, restHours = 8) => {
+    const segments = getRestSegments(watches, restHours).filter(seg => seg.duration > 0);
+    const total = segments.reduce((sum, seg) => sum + seg.duration, 0);
+    if (!segments.length || total <= 0) return null;
+    let pick = Math.random() * total;
+    for (const seg of segments) {
+        if (pick < seg.duration) return { ...seg, total };
+        pick -= seg.duration;
+    }
+    return { ...segments[segments.length - 1], total };
+};
 // ==========================================
 // SHARED COMPONENTS
 // ==========================================
@@ -247,17 +308,54 @@ const Modal = ({ config, onClose }) => {
                         config.onConfirm(); onClose(); }, className: "px-4 py-2 rounded-lg bg-accent text-bg-secondary font-bold shadow-md hover:opacity-90 transition-opacity" }, config.type === 'confirm' ? 'Bestätigen' : 'OK')))));
 };
 const HighlightText = ({ text }) => {
-    const sp = /(\b(?:hostile|neutral|poi|gewinnen|verlieren|erkannt|verpasst|verhindert|überrascht|vermieden)\b)/gi;
-    const tp = /^(?:hostile|neutral|poi|gewinnen|verlieren|erkannt|verpasst|verhindert|überrascht|vermieden)$/i;
-    return text.split(sp).map((part, i) => tp.test(part) ? React.createElement("strong", { key: i, className: "text-accent" }, part) : part);
+    const value = String(text ?? '');
+    const sp = /(\b(?:hostile|neutral|poi|gewinnen|verlieren|erkannt|verpasst|verhindert|überrascht|überraschung|vermieden|encounter|begegnung|forced march|long rest|tagesabschluss|wasser|essen|futter|reise|stealth|detection|perception|d100|erfolg|fehlschlag)\b)/gi;
+    const tp = /^(?:hostile|neutral|poi|gewinnen|verlieren|erkannt|verpasst|verhindert|überrascht|überraschung|vermieden|encounter|begegnung|forced march|long rest|tagesabschluss|wasser|essen|futter|reise|stealth|detection|perception|d100|erfolg|fehlschlag)$/i;
+    return value.split(sp).map((part, i) => tp.test(part) ? React.createElement("strong", { key: i, className: "text-accent" }, part) : part);
+};
+const normalizeLogEntry = (entry) => {
+    if (entry && typeof entry === 'object') return { time: entry.time || '', message: String(entry.message ?? ''), type: entry.type || null };
+    const raw = String(entry ?? '');
+    const m = raw.match(/^([^—]+)\s—\s(.+)$/);
+    return m ? { time: m[1].trim(), message: m[2], type: null } : { time: '', message: raw, type: null };
+};
+const getLogMeta = (entry) => {
+    const text = String(entry.message || '').toLowerCase();
+    const explicit = entry.type;
+    const pick = (icon, label, className) => ({ icon, label, className });
+    if (explicit === 'danger' || /überrascht|unbemerkt|fehlschlag|nicht genug|kein detection|keine wache|hostile/.test(text)) return pick('⚠️', 'Gefahr', 'border-red-500/40 bg-red-500/10 text-red-100');
+    if (explicit === 'success' || /erkannt|vermieden|erfolg|poi gefunden|rückgängig/.test(text)) return pick('✅', 'Erfolg', 'border-emerald-500/40 bg-emerald-500/10 text-emerald-100');
+    if (explicit === 'roll' || /d100|d20|\broll\b|würfel|würfeln|ranges|schwelle/.test(text)) return pick('🎲', 'Wurf', 'border-sky-500/40 bg-sky-500/10 text-sky-100');
+    if (explicit === 'encounter' || /encounter|begegnung|gegner|stealth|detection|perception|wächter/.test(text)) return pick('👁️', 'Encounter', 'border-amber-500/40 bg-amber-500/10 text-amber-100');
+    if (explicit === 'rest' || /long rest|wachzeit|unbewacht|wache|lichtstunden|neuer tag/.test(text)) return pick('🌙', 'Long Rest', 'border-indigo-500/40 bg-indigo-500/10 text-indigo-100');
+    if (explicit === 'resource' || /tagesabschluss|essen|futter|wasser|vorräte|ration|verbrauch/.test(text)) return pick('🥣', 'Ressourcen', 'border-lime-500/40 bg-lime-500/10 text-lime-100');
+    if (explicit === 'travel' || /reise|travel|distanz|forced march|mph/.test(text)) return pick('🥾', 'Reise', 'border-purple-500/40 bg-purple-500/10 text-purple-100');
+    if (explicit === 'system' || /matrix|reset|zurückgesetzt|geladen|abgebrochen|log geleert|widerrufen/.test(text)) return pick('⚙️', 'System', 'border-white/15 bg-white/5 text-slate-200');
+    return pick('📝', 'Info', 'border-border-color bg-glass text-slate-200');
+};
+const LogEntry = ({ entry, index }) => {
+    const e = normalizeLogEntry(entry);
+    const meta = getLogMeta(e);
+    return React.createElement("div", { className: `rounded-lg border px-3 py-2 shadow-sm ${meta.className}` },
+        React.createElement("div", { className: "flex items-start gap-3" },
+            React.createElement("div", { className: "text-lg leading-6 w-6 text-center shrink-0", title: meta.label }, meta.icon),
+            React.createElement("div", { className: "min-w-0 flex-1" },
+                React.createElement("div", { className: "flex flex-wrap items-center gap-2 mb-0.5" },
+                    React.createElement("span", { className: "text-[10px] uppercase tracking-wide font-bold opacity-80" }, meta.label),
+                    e.time && React.createElement("span", { className: "text-[10px] text-muted" }, e.time),
+                    React.createElement("span", { className: "text-[10px] text-muted" }, `#${index + 1}`)),
+                React.createElement("div", { className: "text-sm leading-relaxed whitespace-pre-wrap break-words" }, React.createElement(HighlightText, { text: e.message })))));
 };
 const LogCard = ({ log, result, resultType, onResetLog }) => (React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg flex flex-col" },
     React.createElement("div", { className: "flex justify-between items-center mb-2" },
-        React.createElement("h3", { className: "text-xl font-bold" }, "Log & Ergebnisse"),
-        React.createElement("button", { onClick: onResetLog, className: "bg-transparent border border-border-color text-muted text-sm py-1 px-3 rounded-lg hover:bg-glass transition-colors" }, "Log leeren")),
-    React.createElement("div", { className: `p-3 mb-2 rounded-lg border font-semibold ${RESULT_STYLES[resultType] || RESULT_STYLES.info}` },
+        React.createElement("div", null,
+            React.createElement("h3", { className: "text-xl font-bold" }, "Log & Ergebnisse"),
+            React.createElement("p", { className: "text-xs text-muted" }, log.length ? `${log.length} Einträge · neueste oben` : "Noch keine Log-Einträge")),
+        React.createElement("button", { onClick: onResetLog, className: "bg-transparent border border-border-color text-muted text-sm py-1 px-3 rounded-lg hover:bg-glass hover:text-white transition-colors" }, "Log leeren")),
+    React.createElement("div", { className: `p-3 mb-3 rounded-lg border font-semibold ${RESULT_STYLES[resultType] || RESULT_STYLES.info}` },
         React.createElement(HighlightText, { text: result })),
-    React.createElement("div", { className: "flex-grow h-64 overflow-y-auto p-2 rounded-lg bg-gradient-to-b from-[rgba(255,255,255,0.01)] to-[rgba(255,255,255,0.02)] font-mono text-sm text-muted" }, log.map((entry, i) => React.createElement("p", { key: i, className: "whitespace-pre-wrap" }, entry)))));
+    React.createElement("div", { className: "flex-grow h-80 overflow-y-auto p-2 rounded-lg bg-gradient-to-b from-[rgba(255,255,255,0.015)] to-[rgba(255,255,255,0.03)] text-sm space-y-2" },
+        log.length ? log.map((entry, i) => React.createElement(LogEntry, { key: entry?.id || i, entry: entry, index: i })) : React.createElement("div", { className: "h-full flex items-center justify-center text-muted text-sm italic" }, "Keine Einträge. Starte einen Wurf oder eine Aktion."))));
 const TerrainSelect = ({ value, onChange }) => (React.createElement("div", null,
     React.createElement("label", { className: "block text-sm text-muted mb-1" }, "Gel\u00E4nde / Situation"),
     React.createElement("select", { value: value, onChange: e => onChange(e.target.value), className: "w-full p-2 rounded-lg border border-border-color bg-bg-secondary text-white" }, TERRAIN_OPTIONS.map(o => React.createElement("option", { key: o.value, value: o.value }, o.label)))));
@@ -361,89 +459,114 @@ const DaySettingsCard = ({ settings, setSettings, partyMembers, setPartyMembers,
 // NIGHT SETTINGS
 // ==========================================
 const NightSettingsCard = ({ settings, setSettings, onRestRoll, triggerModal }) => {
+    const e = React.createElement;
     const set = (k, v) => setSettings(prev => ({ ...prev, [k]: v }));
-    const handleWatchCountChange = (e) => {
-        const count = Math.max(1, Math.min(8, parseInt(e.target.value, 10) || 1));
-        if (count < settings.watches.length) {
-            const removed = settings.watches.slice(count);
-            const hasData = removed.some(w => w.name);
-            if (hasData) {
-                triggerModal('confirm', 'Wachen entfernen', `${removed.length} Wachschicht(en) werden entfernt (${removed.map(w => w.name || 'Unbenannt').join(', ')}). Fortfahren?`, () => {
-                    setSettings(prev => ({ ...prev, watchCount: count, watches: prev.watches.slice(0, count) }));
-                });
-                return;
-            }
-        }
-        setSettings(prev => {
-            const nw = [...prev.watches];
-            while (nw.length < count)
-                nw.push({ name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' });
-            return { ...prev, watchCount: count, watches: nw.slice(0, count) };
-        });
-    };
-    const handleWatchChange = (i, field, value) => {
-        setSettings(prev => { const nw = [...prev.watches]; nw[i] = { ...nw[i], [field]: value }; return { ...prev, watches: nw }; });
-    };
-    const autoLightHours = useMemo(() => {
-        if (!settings.watches.length)
-            return 0;
-        return Math.round(settings.watches.filter(w => w.hasLight).length * (8 / settings.watches.length) * 10) / 10;
-    }, [settings.watches]);
+    const watches = useMemo(() => normalizeWatches(settings.watches), [settings.watches]);
+    const longRestHours = getLongRestHours(settings);
+    const totalWatchHours = useMemo(() => Math.round(getTotalWatchHours(watches) * 10) / 10, [watches]);
+    const plannedWatchHours = Math.min(totalWatchHours, longRestHours);
+    const unguardedHours = Math.round(getRestUnguardedHours(watches, longRestHours) * 10) / 10;
+    const autoLightHours = useMemo(() => Math.round(getRestLightHours(watches, longRestHours) * 10) / 10, [watches, longRestHours]);
     const effectiveLH = settings.lightHoursOverride != null && settings.lightHoursOverride !== '' ? (parseFloat(settings.lightHoursOverride) || 0) : autoLightHours;
-    return (React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg" },
-        React.createElement("h3", { className: "text-xl font-bold mb-4" }, "Long Rest Encounter"),
-        React.createElement("div", { className: "grid grid-cols-1 md:grid-cols-2 gap-4" },
-            React.createElement(TerrainSelect, { value: settings.terrain, onChange: v => set('terrain', v) }),
-            React.createElement("div", null,
-                React.createElement("label", { className: "block text-sm text-muted mb-1" }, "Anzahl Wachschichten"),
-                React.createElement("input", { type: "number", min: "1", max: "8", value: settings.watchCount, onChange: handleWatchCountChange, className: "w-full p-2 rounded-lg border border-border-color bg-input-bg text-white" }))),
-        React.createElement("div", { className: "mt-3 p-3 bg-glass rounded-lg" },
-            React.createElement("div", { className: "flex justify-between items-center text-sm" },
-                React.createElement("span", { className: "text-muted" },
-                    "Lichtstunden (auto): ",
-                    React.createElement("strong", { className: "text-white" },
-                        autoLightHours,
-                        "h")),
-                React.createElement("div", { className: "flex items-center gap-2" },
-                    React.createElement("label", { className: "text-muted text-xs" }, "Manuell:"),
-                    React.createElement("input", { type: "number", min: "0", max: "8", step: "0.5", placeholder: "\u2014", value: settings.lightHoursOverride ?? '', onChange: e => set('lightHoursOverride', e.target.value === '' ? null : e.target.value), className: "w-16 p-1 text-sm text-center rounded border border-border-color bg-input-bg text-white" }))),
-            React.createElement("div", { className: "text-xs text-muted mt-1" },
-                "Effektiv: ",
-                React.createElement("strong", { className: "text-accent" },
-                    effectiveLH,
-                    "h"),
-                " \u2014 ",
-                settings.watches.filter(w => w.hasLight).length,
-                "/",
-                settings.watches.length,
-                " Wachen mit Licht")),
-        React.createElement("div", { className: "mt-4 space-y-2" }, settings.watches.map((w, i) => {
-            const wLighting = w.hasLight ? 'bright' : (w.lighting || 'darkness');
-            const vm = getVisionMod(wLighting, w.vision);
-            const effPP = w.pp + vm.mod;
-            return (React.createElement("div", { key: i, className: "grid grid-cols-1 md:grid-cols-[auto,auto,1fr,100px,1fr,80px,50px] gap-2 items-end p-3 bg-glass rounded-lg" },
-                React.createElement("div", { className: "font-bold text-accent self-center text-sm" },
-                    "W",
-                    i + 1),
-                React.createElement("button", { onClick: () => handleWatchChange(i, 'hasLight', !w.hasLight), title: w.hasLight ? 'Licht AN → erzwingt Bright Light' : 'Licht AUS → Umgebungslicht', className: `self-center p-1.5 rounded text-sm border transition-colors ${w.hasLight ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50' : 'bg-input-bg text-muted border-border-color'}` }, w.hasLight ? '🔥' : '🌑'),
-                React.createElement("div", null,
-                    React.createElement("label", { className: "text-xs text-muted" }, "Charakter"),
-                    React.createElement("input", { value: w.name, onChange: e => handleWatchChange(i, 'name', e.target.value), placeholder: "Name", className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white" })),
-                React.createElement("div", null,
-                    React.createElement("label", { className: "text-xs text-muted" }, "Umgebung"),
-                    React.createElement("select", { value: w.lighting || 'darkness', onChange: e => handleWatchChange(i, 'lighting', e.target.value), disabled: w.hasLight, className: `w-full p-1.5 text-sm rounded-md border border-border-color ${w.hasLight ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' : 'bg-bg-secondary text-white'}` }, w.hasLight ? React.createElement("option", { value: "bright" }, "\u2600\uFE0F Bright (Licht)") : LIGHTING_OPTIONS.map(o => React.createElement("option", { key: o.value, value: o.value }, o.label)))),
-                React.createElement("div", null,
-                    React.createElement("label", { className: "text-xs text-muted" }, "Vision"),
-                    React.createElement("select", { value: w.vision, onChange: e => handleWatchChange(i, 'vision', e.target.value), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-bg-secondary text-white" }, Object.entries(VISION_NAMES).map(([k, n]) => React.createElement("option", { key: k, value: k }, n)))),
-                React.createElement("div", null,
-                    React.createElement("label", { className: "text-xs text-muted" }, "Pass. Perc."),
-                    React.createElement("input", { type: "number", min: "1", max: "30", value: w.pp, onChange: e => handleWatchChange(i, 'pp', parseInt(e.target.value, 10) || 1), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white" })),
-                React.createElement("div", { className: "flex flex-col items-center self-end" },
-                    React.createElement("label", { className: "text-[9px] text-muted leading-none mb-0.5" }, "Eff."),
-                    React.createElement("div", { className: `text-sm font-bold ${vm.mod < 0 ? 'text-bad' : 'text-good'}` }, effPP))));
+    const saveWatches = (next) => setSettings(prev => ({ ...prev, watches: next, watchCount: next.length }));
+    const addWatch = () => saveWatches([...watches, makeWatchShift(2)]);
+    const removeWatch = (idx) => {
+        const w = watches[idx];
+        const names = (w?.members || []).map(m => m.name).filter(Boolean).join(', ');
+        triggerModal('confirm', 'Wachschicht entfernen', `Wachschicht ${idx + 1}${names ? ` (${names})` : ''} wirklich entfernen?`, () => saveWatches(watches.filter((_, i) => i !== idx)));
+    };
+    const handleWatchChange = (idx, field, value) => {
+        const nw = watches.map((w, i) => i === idx ? { ...w, [field]: value } : w);
+        saveWatches(nw);
+    };
+    const addWatcher = (idx) => {
+        const nw = watches.map((w, i) => i === idx ? { ...w, members: [...(w.members || []), makeWatchMember()] } : w);
+        saveWatches(nw);
+    };
+    const updateWatcher = (idx, midx, field, value) => {
+        const nw = watches.map((w, i) => {
+            if (i !== idx) return w;
+            const members = (w.members || []).map((m, mi) => mi === midx ? { ...m, [field]: value } : m);
+            return { ...w, members };
+        });
+        saveWatches(nw);
+    };
+    const removeWatcher = (idx, midx) => {
+        const w = watches[idx];
+        if (!w || (w.members || []).length <= 1) return triggerModal('alert', 'Nicht möglich', 'Eine Wachschicht braucht mindestens eine Person.');
+        const nw = watches.map((watch, i) => i === idx ? { ...watch, members: watch.members.filter((_, mi) => mi !== midx) } : watch);
+        saveWatches(nw);
+    };
+    return (e("div", { className: "bg-card rounded-xl p-4 shadow-lg" },
+        e("div", { className: "flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4" },
+            e("h3", { className: "text-xl font-bold" }, "Long Rest Encounter"),
+            e("button", { onClick: addWatch, className: "bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg shadow-md hover:opacity-90 transition-opacity text-sm" }, "+ Wachschicht")),
+        e("div", { className: "grid grid-cols-1 xl:grid-cols-[1fr,2fr] gap-4" },
+            e("div", null,
+                e(TerrainSelect, { value: settings.terrain, onChange: v => set('terrain', v) })),
+            e("div", { className: "p-3 bg-glass rounded-lg border border-border-color" },
+                e("div", { className: "grid grid-cols-1 md:grid-cols-5 gap-3 text-sm" },
+                    e("div", null,
+                        e("label", { className: "text-muted text-xs block mb-1" }, "Long Rest Dauer"),
+                        e("input", { type: "number", min: "0.25", max: "24", step: "0.25", value: longRestHours, onChange: ev => set('longRestHours', Math.max(0.25, safeFloat(ev.target.value))), className: "w-full p-1.5 text-sm text-center rounded border border-border-color bg-input-bg text-white" })),
+                    e("div", null,
+                        e("div", { className: "text-muted text-xs" }, "Wachzeit geplant"),
+                        e("div", { className: `font-bold ${Math.abs(totalWatchHours - longRestHours) < 0.01 ? 'text-good' : 'text-amber-300'}` }, fmt(totalWatchHours), "h", totalWatchHours > longRestHours ? " — zu viel" : "")),
+                    e("div", null,
+                        e("div", { className: "text-muted text-xs" }, "Unbewacht"),
+                        e("div", { className: `font-bold ${unguardedHours > 0 ? 'text-bad' : 'text-good'}` }, fmt(unguardedHours), "h")),
+                    e("div", null,
+                        e("div", { className: "text-muted text-xs" }, "Lichtstunden auto"),
+                        e("div", { className: "font-bold text-accent" }, fmt(autoLightHours), "h")),
+                    e("div", null,
+                        e("label", { className: "text-muted text-xs block mb-1" }, "Lichtstunden manuell"),
+                        e("input", { type: "number", min: "0", max: "24", step: "0.25", placeholder: "auto", value: settings.lightHoursOverride ?? '', onChange: ev => set('lightHoursOverride', ev.target.value === '' ? null : ev.target.value), className: "w-full p-1.5 text-sm text-center rounded border border-border-color bg-input-bg text-white" }))),
+                e("div", { className: "text-xs text-muted mt-2" },
+                    "Abgedeckte Zeit: ", e("strong", { className: "text-white" }, fmt(plannedWatchHours), "h"),
+                    ", unbewacht: ", e("strong", { className: unguardedHours > 0 ? "text-bad" : "text-good" }, fmt(unguardedHours), "h"),
+                    ". Basis-Chance skaliert mit Restdauer; Licht zählt pro tatsächlicher Lichtstunde. Encounter-Segment wird nach Dauer gewichtet."))),
+        e("div", { className: "mt-4 space-y-3" }, watches.length === 0
+            ? e("div", { className: "p-4 bg-bad/10 border border-bad/40 rounded-lg text-sm text-bad" }, "Keine Wachschichten angelegt. Die gesamte Long Rest Dauer zählt als unbewacht.")
+            : watches.map((w, i) => {
+            const lighting = getWatchLighting(w);
+            const lightingLabel = LIGHTING_OPTIONS.find(o => o.value === lighting)?.short || lighting;
+            const best = getBestWatchMember(w);
+            return e("div", { key: i, className: "p-3 bg-glass rounded-lg border border-border-color space-y-3" },
+                e("div", { className: "grid grid-cols-1 md:grid-cols-[auto,110px,auto,140px,1fr,auto] gap-2 items-end" },
+                    e("div", { className: "font-bold text-accent text-sm pb-2" }, "W", i + 1),
+                    e("div", null,
+                        e("label", { className: "text-xs text-muted" }, "Dauer (h)"),
+                        e("input", { type: "number", min: "0.25", max: "24", step: "0.25", value: w.durationHours, onChange: ev => handleWatchChange(i, 'durationHours', Math.max(0.25, safeFloat(ev.target.value))), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white" })),
+                    e("button", { onClick: () => handleWatchChange(i, 'hasLight', !w.hasLight), title: w.hasLight ? 'Licht AN → erzwingt Bright Light' : 'Licht AUS → Umgebungslicht', className: `p-1.5 rounded text-sm border transition-colors ${w.hasLight ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50' : 'bg-input-bg text-muted border-border-color'}` }, w.hasLight ? '🔥 Licht' : '🌑 Dunkel'),
+                    e("div", null,
+                        e("label", { className: "text-xs text-muted" }, "Umgebung"),
+                        e("select", { value: w.lighting || 'darkness', onChange: ev => handleWatchChange(i, 'lighting', ev.target.value), disabled: w.hasLight, className: `w-full p-1.5 text-sm rounded-md border border-border-color ${w.hasLight ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' : 'bg-bg-secondary text-white'}` }, w.hasLight ? e("option", { value: "bright" }, "☀️ Bright") : LIGHTING_OPTIONS.map(o => e("option", { key: o.value, value: o.value }, o.label)))),
+                    e("div", { className: "text-xs text-muted" },
+                        "Licht: ", e("strong", { className: "text-white" }, w.hasLight ? 'Bright durch eigenes Licht' : lightingLabel),
+                        " | Beste Wahrnehmung: ", e("strong", { className: "text-accent" }, best ? `${best.name || 'Unbenannt'} ${best.effectivePP}` : '—')),
+                    e("button", { onClick: () => removeWatch(i), className: "px-2 py-1 rounded border border-border-color text-muted hover:text-bad hover:border-bad text-sm" }, "Entfernen")),
+                e("div", { className: "space-y-2" }, (w.members || []).map((m, mi) => {
+                    const vm = getVisionMod(lighting, m.vision || 'none');
+                    const eff = (parseInt(m.pp, 10) || 12) + vm.mod;
+                    return e("div", { key: mi, className: "grid grid-cols-1 md:grid-cols-[1fr,180px,90px,70px,32px] gap-2 items-end bg-black/10 rounded-lg p-2" },
+                        e("div", null,
+                            e("label", { className: "text-xs text-muted" }, "Wächter"),
+                            e("input", { value: m.name || '', onChange: ev => updateWatcher(i, mi, 'name', ev.target.value), placeholder: "Name", className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white" })),
+                        e("div", null,
+                            e("label", { className: "text-xs text-muted" }, "Vision"),
+                            e("select", { value: m.vision || 'none', onChange: ev => updateWatcher(i, mi, 'vision', ev.target.value), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-bg-secondary text-white" }, Object.entries(VISION_NAMES).map(([k, n]) => e("option", { key: k, value: k }, n)))),
+                        e("div", null,
+                            e("label", { className: "text-xs text-muted" }, "Pass. Perc."),
+                            e("input", { type: "number", min: "1", max: "40", value: m.pp, onChange: ev => updateWatcher(i, mi, 'pp', Math.max(1, parseInt(ev.target.value, 10) || 1)), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white" })),
+                        e("div", { className: "flex flex-col items-center" },
+                            e("label", { className: "text-[9px] text-muted leading-none mb-0.5" }, "Eff."),
+                            e("div", { title: vm.label, className: `text-sm font-bold ${vm.mod < 0 ? 'text-bad' : 'text-good'}` }, eff)),
+                        e("button", { onClick: () => removeWatcher(i, mi), className: "text-muted hover:text-bad transition-colors pb-1" }, "×"));
+                })),
+                e("button", { onClick: () => addWatcher(i), className: "text-xs bg-black/10 px-2 py-1 rounded border border-border-color text-muted hover:text-white hover:bg-input-bg transition-colors" }, "+ Wächter in diese Schicht"));
         })),
-        React.createElement("div", { className: "flex gap-2 mt-4" },
-            React.createElement("button", { onClick: onRestRoll, className: "flex-1 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:opacity-90 transition-opacity" }, "Long Rest w\u00FCrfeln"))));
+        e("div", { className: "flex gap-2 mt-4" },
+            e("button", { onClick: onRestRoll, className: "flex-1 bg-gradient-to-r from-indigo-500 to-purple-600 text-white font-bold py-2 px-4 rounded-lg shadow-md hover:opacity-90 transition-opacity" }, "Long Rest würfeln"))));
 };
 // ==========================================
 // MATRIX EDITOR
@@ -563,20 +686,8 @@ const FlowPanels = ({ flowState, setFlowState, setResult, setResultType, addLog,
                                 return triggerModal('alert', 'Fehler', 'Bitte Würfe eingeben.');
                             const ea = Math.round(avg(rolls));
                             addLog(`Gegner Stealth: [${rolls.join(', ')}] → ø ${ea}`);
-                            if (flowState.context === 'night' && flowState.watchPerception) {
-                                const pp = flowState.watchPerception.effectivePP;
-                                addLog(`Auto-Detection (Nacht): Eff. Passive Perception ${pp} vs Stealth ø ${ea}`);
-                                if (pp >= ea) {
-                                    setResult(`Gegner erkannt! ${flowState.affectedWatch?.name || 'Wache'} bemerkt die Feinde (Passive Perception ${pp} ≥ Stealth ${ea}) → weckt alle.`);
-                                    setResultType('hostile');
-                                    addLog(`erkannt → alle wach`);
-                                }
-                                else {
-                                    setResult(`Gruppe überrascht! ${flowState.affectedWatch?.name || 'Wache'} bemerkt nichts (Passive Perception ${pp} < Stealth ${ea}).`);
-                                    setResultType('hostile');
-                                    addLog(`überrascht → nur ${flowState.affectedWatch?.name || 'Wache'} wach`);
-                                }
-                                setFlowState(null);
+                            if (flowState.context === 'night' && (flowState.watchMembers || flowState.watchPerception)) {
+                                setFlowState({ ...flowState, step: 'watcherDetectionInput', enemyStealthAvg: ea });
                             }
                             else if (flowState.context === 'day' && bestEffPP) {
                                 const pp = bestEffPP.eff;
@@ -596,8 +707,52 @@ const FlowPanels = ({ flowState, setFlowState, setResult, setResultType, addLog,
                             else {
                                 setFlowState({ ...flowState, step: 'detection', enemyStealthAvg: ea });
                             }
-                        } }, "Best\u00E4tigen"),
+                        } }, "Bestätigen"),
                     React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
+            case 'watcherDetectionInput': {
+                const watchers = (flowState.watchMembers && flowState.watchMembers.length ? flowState.watchMembers : [flowState.watchBest || flowState.affectedWatch || { name: 'Wache', effectivePP: flowState.watchPerception?.effectivePP || 10, pp: flowState.watchPerception?.effectivePP || 10 }]);
+                const enemyStealth = flowState.enemyStealthAvg || 0;
+                return (React.createElement(FlowPanel, { title: "Wächter-Perception" },
+                    React.createElement("div", { className: "text-sm text-muted mb-3" },
+                        "Gegner-Stealth: ", React.createElement("strong", { className: "text-white" }, enemyStealth),
+                        ". Werte sind mit effektiver Passive Perception vorausgefüllt. Du kannst sie durch aktive Perception-Würfe ersetzen."),
+                    React.createElement("div", { className: "space-y-2 mb-4" }, watchers.map((w, i) => {
+                        const base = w.effectivePP ?? w.pp ?? 10;
+                        const valKey = `watchDetect_${i}`;
+                        return React.createElement("div", { key: i, className: "grid grid-cols-[1fr,90px] gap-2 items-end p-2 bg-glass rounded-lg" },
+                            React.createElement("div", { className: "min-w-0" },
+                                React.createElement("div", { className: "font-bold text-white truncate" }, w.name || 'Unbenannt'),
+                                React.createElement("div", { className: "text-xs text-muted" },
+                                    VISION_NAMES[w.vision] || 'Vision unbekannt',
+                                    w.visionLabel ? ` — ${w.visionLabel}` : '',
+                                    " | passiv/eff.: ", base)),
+                            React.createElement("div", null,
+                                React.createElement("label", { className: "text-xs text-muted" }, "Wert"),
+                                React.createElement("input", { type: "number", min: "1", value: li[valKey] ?? base, onChange: e => inp(valKey, e.target.value), className: "w-full p-1.5 text-sm rounded-md border border-border-color bg-input-bg text-white text-center" })));
+                    })),
+                    React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => {
+                                const results = watchers.map((w, i) => {
+                                    const base = w.effectivePP ?? w.pp ?? 10;
+                                    const value = parseInt(li[`watchDetect_${i}`] ?? base, 10) || base;
+                                    return { ...w, detectionValue: value };
+                                });
+                                const best = results.reduce((a, b) => b.detectionValue > a.detectionValue ? b : a, results[0]);
+                                addLog(`Wächter-Perception: ${results.map(r => `${r.name || 'Unbenannt'} ${r.detectionValue}`).join(', ')} vs Stealth ${enemyStealth}`);
+                                if (best.detectionValue >= enemyStealth) {
+                                    setResult(`Gegner erkannt! ${best.name || 'Eine Wache'} bemerkt die Feinde (${best.detectionValue} ≥ Stealth ${enemyStealth}) → weckt alle.`);
+                                    setResultType('hostile');
+                                    addLog(`erkannt durch ${best.name || 'Wache'} → alle wach`);
+                                }
+                                else {
+                                    setResult(`Gruppe überrascht! Keine Wache bemerkt die Gegner. Bester Wert ${best.detectionValue} < Stealth ${enemyStealth}.`);
+                                    setResultType('hostile');
+                                    addLog('überrascht → keine Wache erkennt die Gegner rechtzeitig');
+                                }
+                                setFlowState(null);
+                            } }, "Auswerten"),
+                        React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
+            }
             case 'ppContest': {
                 const autoPP = bestEffPP ? bestEffPP.eff.toString() : '';
                 const dPP = li.playerPP !== undefined ? li.playerPP : autoPP;
@@ -722,33 +877,29 @@ const FlowPanels = ({ flowState, setFlowState, setResult, setResultType, addLog,
             case 'nightEncounterInfo': {
                 const wl = flowState.watchLighting || (flowState.watchHasLight ? 'bright' : 'darkness');
                 const wlLabel = LIGHTING_OPTIONS.find(o => o.value === wl)?.label || wl;
-                const hasMalus = flowState.watchPerception && flowState.watchPerception.effectivePP < flowState.affectedWatch?.pp;
-                return (React.createElement(FlowPanel, { title: `Long Rest Encounter: ${flowState.affectedWatch?.name || 'Unbenannt'}` },
-                    React.createElement("div", { className: "text-muted mb-4 space-y-1" },
+                const watchers = flowState.watchMembers && flowState.watchMembers.length ? flowState.watchMembers : [flowState.watchBest || flowState.affectedWatch || { name: 'Wache', effectivePP: flowState.watchPerception?.effectivePP || 10 }];
+                const best = flowState.watchBest || watchers.reduce((a, b) => (b.effectivePP || 0) > (a.effectivePP || 0) ? b : a, watchers[0]);
+                return (React.createElement(FlowPanel, { title: `Long Rest Encounter: ${flowState.watchLabel || 'Wachschicht'}` },
+                    React.createElement("div", { className: "text-muted mb-4 space-y-2" },
                         React.createElement("p", null,
-                            React.createElement("strong", null, "Vision:"),
-                            " ",
-                            VISION_NAMES[flowState.affectedWatch?.vision] || 'N/A'),
-                        React.createElement("p", null,
-                            React.createElement("strong", null, "Lichtverh\u00E4ltnis:"),
+                            React.createElement("strong", null, "Lichtverhältnis:"),
                             " ",
                             flowState.watchHasLight ? '🔥 Eigenes Licht → Bright Light' : wlLabel),
                         React.createElement("p", null,
-                            React.createElement("strong", null, "Basis Passive Perception:"),
+                            React.createElement("strong", null, "Beste Wahrnehmung:"),
                             " ",
-                            flowState.affectedWatch?.pp,
-                            " \u2192 ",
-                            React.createElement("strong", null, "Effektiv:"),
-                            " ",
-                            flowState.watchPerception?.effectivePP,
-                            " (",
-                            flowState.watchPerception?.modifier,
-                            ")")),
-                    hasMalus && React.createElement("div", { className: "p-2 mb-2 bg-bad/20 border border-bad/50 text-bad rounded-lg text-sm" },
-                        "\u26A0\uFE0F Passive Perception reduziert: ",
-                        flowState.watchPerception?.modifier),
+                            React.createElement("span", { className: "text-accent font-bold" }, best?.name || 'Unbenannt'),
+                            " mit ",
+                            React.createElement("span", { className: "text-white font-bold" }, best?.effectivePP ?? '?')),
+                        React.createElement("div", { className: "space-y-1" }, watchers.map((w, i) => React.createElement("div", { key: i, className: "grid grid-cols-[1fr,70px] gap-2 p-2 bg-glass rounded text-sm" },
+                            React.createElement("div", { className: "min-w-0" },
+                                React.createElement("span", { className: "font-bold text-white" }, w.name || 'Unbenannt'),
+                                React.createElement("span", { className: "text-muted" }, ` — ${VISION_NAMES[w.vision] || 'Vision?'}${w.visionLabel ? ` | ${w.visionLabel}` : ''}`)),
+                            React.createElement("div", { className: `text-right font-bold ${(w.visionMod || 0) < 0 ? 'text-bad' : 'text-good'}` }, w.effectivePP ?? w.pp ?? '?'))))),
+                    React.createElement("div", { className: "p-2 mb-3 bg-black/10 border border-border-color text-muted rounded-lg text-sm" },
+                        "Wenn Gegner schleichen, bekommen alle Wächter dieser Schicht eine Chance. Die Werte sind später mit effektiver Passive Perception vorausgefüllt und können durch aktive Perception-Würfe ersetzt werden."),
                     React.createElement("div", { className: "flex gap-2" },
-                        React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => { addLog('Stealth-Mechanik gestartet'); setFlowState({ ...flowState, step: 'enemyStealthChoice' }); } }, "Stealth-Mechanik starten"),
+                        React.createElement("button", { className: "flex-1 bg-accent text-bg-secondary font-bold py-2 px-4 rounded-lg", onClick: () => { addLog('Stealth/Perception-Mechanik gestartet'); setFlowState({ ...flowState, step: 'enemyStealthChoice' }); } }, "Stealth/Perception prüfen"),
                         React.createElement("button", { className: "flex-1 bg-transparent border border-border-color text-muted py-2 px-4 rounded-lg", onClick: cancel }, "Abbrechen"))));
             }
             default: return null;
@@ -1259,7 +1410,11 @@ const SAVE_INDEX_KEY = 'enc_saves_index';
 const SAVE_DATA_PREFIX = 'enc_save_';
 const ACTIVE_SAVE_KEY = 'enc_active_save';
 const DEFAULT_GAME_STATE = {
-    settings: { terrain: 'road', pace: 'normal', vehicle: 'no', travelLighting: 'bright', watchCount: 3, lightHoursOverride: null, watches: [{ name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' }, { name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' }, { name: '', vision: 'none', pp: 12, hasLight: false, lighting: 'darkness' }] },
+    settings: { terrain: 'road', pace: 'normal', vehicle: 'no', travelLighting: 'bright', longRestHours: 8, watchCount: 3, lightHoursOverride: null, watches: [
+        { durationHours: 3, hasLight: false, lighting: 'darkness', members: [{ name: '', vision: 'none', pp: 12 }] },
+        { durationHours: 3, hasLight: false, lighting: 'darkness', members: [{ name: '', vision: 'none', pp: 12 }] },
+        { durationHours: 2, hasLight: false, lighting: 'darkness', members: [{ name: '', vision: 'none', pp: 12 }] }
+    ] },
     journey: { name: 'Neue Reise', totalDistance: 100, traveledDistance: 0, baseSpeed: 30, day: 1, hoursTraveledToday: 0, autoEncounter: true, autoNightEncounter: true },
     resourceSettings: { isHot: false },
     party: [{ id: '1', name: 'Charakter 1', pp: 14, vision: 'none' }, { id: '2', name: 'Charakter 2', pp: 12, vision: 'none' }],
@@ -1551,7 +1706,7 @@ const App = () => {
         const s = idx.find(s => s.id === id);
         return s?.name || null;
     }, [saveManagerOpen, settings, journey, resourceSettings]);
-    const addLog = (msg) => setLog(prev => [`${new Date().toLocaleTimeString()} — ${msg}`, ...prev]);
+    const addLog = (msg, type = null) => setLog(prev => [{ id: generateId(), time: new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' }), message: String(msg ?? ''), type }, ...prev]);
     const resetLog = () => { setLog([]); setResult('Log geleert.'); setResultType('info'); setFlow(null); };
     const resetAll = () => tm('confirm', 'Alles zurücksetzen', 'Alle Einstellungen auf Standard zurücksetzen?', () => {
         loadState(JSON.parse(JSON.stringify(DEFAULT_GAME_STATE)));
@@ -1596,31 +1751,53 @@ const App = () => {
         else
             setFlow(null);
         const tn = TERRAIN_MAP[settings.terrain], ni = matrix.night[tn];
+        const watches = normalizeWatches(settings.watches);
+        const restHours = getLongRestHours(settings);
+        const totalWatchHours = Math.round(getTotalWatchHours(watches) * 10) / 10;
+        const unguardedHours = Math.round(getRestUnguardedHours(watches, restHours) * 10) / 10;
         const bt = ni.basis[1];
-        const autoLH = settings.watches.length ? Math.round(settings.watches.filter(w => w.hasLight).length * (8 / settings.watches.length) * 10) / 10 : 0;
+        const scaledBase = Math.round((bt * (restHours / 8)) * 100) / 100;
+        const autoLH = Math.round(getRestLightHours(watches, restHours) * 10) / 10;
         const eLH = settings.lightHoursOverride != null && settings.lightHoursOverride !== '' ? (parseFloat(settings.lightHoursOverride) || 0) : autoLH;
-        const lb = eLH * ni.light, thr = bt + lb;
+        const lb = eLH * ni.light, thr = scaledBase + lb;
         const d = rnd(100);
         addLog(`Long Rest Encounter: "${tn}"`);
-        addLog(`Schwelle: ${bt} + ${eLH}h × ${ni.light} = ${thr} → Encounter bei 1-${thr}`);
+        addLog(`Long Rest Dauer: ${fmt(restHours)}h | Wachzeit geplant: ${fmt(totalWatchHours)}h | Unbewacht: ${fmt(unguardedHours)}h${totalWatchHours > restHours ? ` | ${fmt(totalWatchHours - restHours)}h Wachzeit liegen außerhalb der Restdauer und werden für Encounter ignoriert.` : ''}`);
+        addLog(`Schwelle: Basis ${bt} × ${fmt(restHours)}/8 = ${fmt(scaledBase)}; + ${fmt(eLH)}h Licht × ${ni.light} = ${fmt(thr)} → Encounter bei 1-${fmt(thr)}`);
         addLog(`d100 → ${d}`);
         if (d > thr) {
-            setResult(`Keine Begegnung. (d100: ${d}, Schwelle: ${thr})`);
+            setResult(`Keine Begegnung. (d100: ${d}, Schwelle: ${fmt(thr)})`);
             setResultType('none');
             addLog('Keine Begegnung.');
             return;
         }
         setResultType('hostile');
-        const wr = rnd(settings.watches.length), aw = settings.watches[wr - 1];
-        addLog(`Encounter! Wache ${wr}: ${aw.name || 'Unbenannt'}`);
-        const watchLighting = aw.hasLight ? 'bright' : (aw.lighting || 'darkness');
+        const chosen = chooseWeightedRestSegment(watches, restHours);
+        if (!chosen) {
+            tm('alert', 'Keine gültige Restdauer', 'Es konnte kein gültiges Segment innerhalb der Long Rest Dauer ausgewählt werden.');
+            return;
+        }
+        if (chosen.type === 'unguarded') {
+            const watchLabel = `Unbewachte Zeit (${fmt(chosen.duration)}h, Stunde ${fmt(chosen.start)}–${fmt(chosen.end)})`;
+            addLog(`Encounter! ${watchLabel}`);
+            addLog('Keine Wache aktiv → kein Detection-Wurf. Gegner erreichen das Lager unbemerkt; Gruppe wird überrascht.');
+            setResult(`Long Rest Encounter! ${watchLabel}. Keine Wache aktiv — Gruppe wird automatisch überrascht.`);
+            setResultType('hostile');
+            setFlow(null);
+            return;
+        }
+        const aw = chosen.watch;
+        const wr = chosen.index + 1;
+        const watchLabel = `Wache ${wr} (${fmt(chosen.duration)}h, Stunde ${fmt(chosen.start)}–${fmt(chosen.end)})`;
+        addLog(`Encounter! ${watchLabel}`);
+        const watchLighting = getWatchLighting(aw);
         const watchLightLabel = LIGHTING_OPTIONS.find(o => o.value === watchLighting)?.short || watchLighting;
-        const vm = getVisionMod(watchLighting, aw.vision);
-        const ep = aw.pp + vm.mod;
-        addLog(`Umgebung: ${aw.hasLight ? '🔥 Eigenes Licht → Bright' : watchLightLabel} | ${VISION_NAMES[aw.vision]} → ${vm.label}`);
-        addLog(`Passive Perception: ${aw.pp} ${vm.mod !== 0 ? vm.mod : ''} = ${ep}`);
-        setResult(`Long Rest Encounter! Wache ${wr}: ${aw.name || 'Unbenannt'} (Eff. Passive Perception: ${ep})`);
-        setFlow({ step: 'nightEncounterInfo', context: 'night', encounterType: 'hostile', d, affectedWatch: aw, watchHasLight: aw.hasLight, watchLighting, watchPerception: { effectivePP: ep, modifier: vm.label } });
+        const watchMembers = getWatchMemberDetails(aw);
+        const watchBest = watchMembers.length ? watchMembers.reduce((best, m) => m.effectivePP > best.effectivePP ? m : best, watchMembers[0]) : null;
+        addLog(`Umgebung: ${aw.hasLight ? '🔥 Eigenes Licht → Bright' : watchLightLabel}`);
+        watchMembers.forEach(m => addLog(`Wächter: ${m.name || 'Unbenannt'} | ${VISION_NAMES[m.vision]} | Passive Perception ${m.pp} ${m.visionMod !== 0 ? m.visionMod : ''} = ${m.effectivePP}`));
+        setResult(`Long Rest Encounter! ${watchLabel}. Beste Wahrnehmung: ${watchBest?.name || 'Unbenannt'} (${watchBest?.effectivePP ?? '?'})`);
+        setFlow({ step: 'nightEncounterInfo', context: 'night', encounterType: 'hostile', d, affectedWatch: watchBest, watchLabel, watchMembers, watchBest, watchHasLight: aw.hasLight, watchLighting, watchPerception: { effectivePP: watchBest?.effectivePP ?? 10, modifier: watchBest?.visionLabel || '' } });
     };
     const handleJourneyTravel = (hours) => {
         const h = Math.max(0, safeFloat(hours));
