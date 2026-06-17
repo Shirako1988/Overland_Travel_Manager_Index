@@ -829,7 +829,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
         return;
     } setStorages(p => p.map(s => s.id === t ? { ...s, water: s.water + ta } : s)); setFs(p => ({ ...p, waterFound: p.waterFound - ta })); };
     const discardFor = () => triggerModal('confirm', 'Wegwerfen?', `${fs.foodFound}lb Essen und ${fs.waterFound}gal Wasser zurücklassen?`, () => setFs(p => ({ ...p, step: 'idle' })));
-    return (React.createElement("div", { className: "grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(360px,480px)] 2xl:grid-cols-[minmax(560px,0.95fr)_minmax(620px,1.05fr)] gap-4 items-start" },
+    return (React.createElement("div", { className: "grid grid-cols-1 xl:grid-cols-[minmax(560px,0.95fr)_minmax(620px,1.05fr)] gap-4 items-start" },
         rat.isOpen && (React.createElement("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" },
             React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-2xl w-full p-6 flex flex-col max-h-[90vh]" },
                 React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Rationierung & Verbrauch"),
@@ -1001,7 +1001,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                                 "\uD83D\uDCA7 ",
                                 totalStored.water.toFixed(1))))),
                 React.createElement("button", { onClick: openRat, disabled: creatures.length === 0, className: "w-full bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold py-3 rounded-lg" }, "Tagesration verbrauchen"),
-                lastSS && React.createElement("button", { onClick: undo, className: "w-full mt-2 text-muted text-sm hover:text-white transition-colors" }, "Widerrufen"))),
+                lastSS && React.createElement("button", { onClick: undo, className: "w-full mt-2 text-muted text-sm hover:text-white transition-colors" }, "Widerrufen")))),
         React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg h-fit min-w-0" },
             React.createElement("div", { className: "flex justify-between items-center mb-4" },
                 React.createElement("h3", { className: "text-xl font-bold" }, "Lager & Vorr\u00E4te"),
@@ -1038,7 +1038,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                             React.createElement("input", { type: "number", step: "1", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.feed || 0, onChange: e => numChange(s.id, 'feed', e.target.value, setStorages) })))) : (React.createElement("div", { className: "col-span-2" },
                         React.createElement("label", { className: "text-[10px] text-muted block" }, "Wasser (gal)"),
                         React.createElement("input", { type: "number", step: "1", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.water, onChange: e => numChange(s.id, 'water', e.target.value, setStorages) }))))));
-            }))))));
+            })))));
 };
 
 // ==========================================
