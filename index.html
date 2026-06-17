@@ -155,6 +155,20 @@ const calcTotalStored = (storages) => (storages || []).reduce((a, s) => {
     if (s.storageType === 'water') return { ...a, water: a.water + safeFloat(s.water) };
     return { ...a, food: a.food + safeFloat(s.food), feed: a.feed + safeFloat(s.feed || 0) };
 }, { food: 0, water: 0, feed: 0 });
+const DEFAULT_STORAGE_CAPACITY = { food_feed: 100, water: 60 };
+const hasStorageValue = (v) => v !== undefined && v !== null && v !== '';
+const getStorageCapacity = (storage, type = storage?.storageType || 'food_feed') => {
+    const fallback = DEFAULT_STORAGE_CAPACITY[type] ?? DEFAULT_STORAGE_CAPACITY.food_feed;
+    if (!storage) return fallback;
+    if (type === 'water') {
+        if (hasStorageValue(storage.maxCapacityWater)) return safeFloat(storage.maxCapacityWater);
+        if ((storage.storageType || 'food_feed') === 'water' && hasStorageValue(storage.maxCapacity)) return safeFloat(storage.maxCapacity);
+        return fallback;
+    }
+    if (hasStorageValue(storage.maxCapacityFoodFeed)) return safeFloat(storage.maxCapacityFoodFeed);
+    if ((storage.storageType || 'food_feed') === 'food_feed' && hasStorageValue(storage.maxCapacity)) return safeFloat(storage.maxCapacity);
+    return fallback;
+};
 const applyDailyRationConsumption = ({ creatures, storages, selections, isHot = false }) => {
     const need = calcRationTotals(creatures, selections, isHot);
     const stored = calcTotalStored(storages);
@@ -921,17 +935,34 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
     const [rat, setRat] = useState({ isOpen: false, selections: {} });
     const [fs, setFs] = useState({ step: 'idle', dc: 15, wisMod: 0, checkResult: 0, foodFound: 0, waterFound: 0, mishap: false, selectedFoodStoreId: '', selectedWaterStoreId: '', isRanger: false });
     const getAvail = (type) => storages.filter(s => { if (!s.isActive || s.storageType !== type)
-        return false; const cl = type === 'water' ? s.water : (s.food + (s.feed || 0) * FEED_WEIGHT_LB); return cl < s.maxCapacity; });
+        return false; const cl = type === 'water' ? s.water : (s.food + (s.feed || 0) * FEED_WEIGHT_LB); return cl < getStorageCapacity(s, type); });
     useEffect(() => { if (fs.step === 'result') {
         const af = getAvail('food_feed'), aw = getAvail('water');
         setFs(p => ({ ...p, selectedFoodStoreId: af.length ? af[0].id : '', selectedWaterStoreId: aw.length ? aw[0].id : '' }));
     } }, [fs.step, storages]);
     const numChange = (id, field, vs, setter) => setter(p => p.map(item => item.id !== id ? item : { ...item, [field]: vs === '' ? 0 : (isNaN(parseFloat(vs)) ? 0 : parseFloat(vs)) }));
-    const storTypeChange = (id, nt) => setStorages(p => p.map(s => s.id !== id ? s : { ...s, storageType: nt }));
+    const capacityChange = (id, vs) => {
+        const value = vs === '' ? 0 : (isNaN(parseFloat(vs)) ? 0 : parseFloat(vs));
+        setStorages(p => p.map(s => {
+            if (s.id !== id) return s;
+            return (s.storageType || 'food_feed') === 'water'
+                ? { ...s, maxCapacityWater: value, maxCapacity: value }
+                : { ...s, maxCapacityFoodFeed: value, maxCapacity: value };
+        }));
+    };
+    const storTypeChange = (id, nt) => setStorages(p => p.map(s => {
+        if (s.id !== id) return s;
+        const oldType = s.storageType || 'food_feed';
+        const oldCap = getStorageCapacity(s, oldType);
+        const savedOldCap = oldType === 'water' ? { maxCapacityWater: oldCap } : { maxCapacityFoodFeed: oldCap };
+        const withSavedOldCap = { ...s, ...savedOldCap };
+        const nextCap = getStorageCapacity(withSavedOldCap, nt);
+        return { ...withSavedOldCap, storageType: nt, maxCapacity: nextCap };
+    }));
     const addC = () => setCreatures(p => [...p, { id: generateId(), name: 'Neuer Charakter', size: 'Medium', usesFeed: false, conMod: 0, daysWithoutFood: 0, exhaustion: emptyExhaustion() }]);
     const updC = (id, f, v) => setCreatures(p => p.map(c => c.id === id ? { ...c, [f]: v } : c));
     const remC = (id) => triggerModal('confirm', 'Löschen', 'Eintrag wirklich löschen?', () => setCreatures(p => p.filter(c => c.id !== id)));
-    const addS = () => setStorages(p => [...p, { id: generateId(), name: 'Neues Lager', isActive: true, storageType: 'food_feed', maxCapacity: 100, food: 0, water: 0, feed: 0 }]);
+    const addS = () => setStorages(p => [...p, { id: generateId(), name: 'Neues Lager', isActive: true, storageType: 'food_feed', maxCapacity: 100, maxCapacityFoodFeed: 100, maxCapacityWater: 60, food: 0, water: 0, feed: 0 }]);
     const updS = (id, f, v) => setStorages(p => p.map(s => s.id === id ? { ...s, [f]: v } : s));
     const remS = (id) => triggerModal('confirm', 'Lager löschen', 'Wirklich löschen?', () => setStorages(p => p.filter(s => s.id !== id)));
     const getReq = (c) => getCreatureReq(c, isHot);
@@ -980,13 +1011,13 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
     } setFs(p => ({ ...p, step: 'result', foodFound: f, waterFound: w, mishap: m })); };
     const storeF = () => { const t = fs.selectedFoodStoreId; if (!t)
         return; const ts = storages.find(s => s.id === t); if (!ts)
-        return; const cl = ts.food + (ts.feed || 0) * FEED_WEIGHT_LB; const sp = ts.maxCapacity - cl; const ta = Math.min(sp, fs.foodFound); if (ta <= 0) {
+        return; const cl = ts.food + (ts.feed || 0) * FEED_WEIGHT_LB; const sp = getStorageCapacity(ts, 'food_feed') - cl; const ta = Math.min(sp, fs.foodFound); if (ta <= 0) {
         triggerModal('alert', 'Voll', 'Lager voll.');
         return;
     } setStorages(p => p.map(s => s.id === t ? { ...s, food: s.food + ta } : s)); setFs(p => ({ ...p, foodFound: p.foodFound - ta })); };
     const storeW = () => { const t = fs.selectedWaterStoreId; if (!t)
         return; const ts = storages.find(s => s.id === t); if (!ts)
-        return; const sp = ts.maxCapacity - ts.water; const ta = Math.min(sp, fs.waterFound); if (ta <= 0) {
+        return; const sp = getStorageCapacity(ts, 'water') - ts.water; const ta = Math.min(sp, fs.waterFound); if (ta <= 0) {
         triggerModal('alert', 'Voll', 'Lager voll.');
         return;
     } setStorages(p => p.map(s => s.id === t ? { ...s, water: s.water + ta } : s)); setFs(p => ({ ...p, waterFound: p.waterFound - ta })); };
@@ -1092,7 +1123,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                                 React.createElement("select", { value: fs.selectedFoodStoreId, onChange: e => setFs(p => ({ ...p, selectedFoodStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('food_feed').map(s => { const cl = s.food + (s.feed || 0) * FEED_WEIGHT_LB; return React.createElement("option", { key: s.id, value: s.id },
                                     s.name,
                                     " (",
-                                    (s.maxCapacity - cl).toFixed(1),
+                                    (getStorageCapacity(s, 'food_feed') - cl).toFixed(1),
                                     "lb frei)"); })),
                                 React.createElement("button", { onClick: storeF, className: "bg-good text-bg-secondary px-3 py-1 rounded text-sm font-bold" }, "OK"))),
                         fs.waterFound > 0 && React.createElement("div", { className: "bg-glass p-3 rounded-lg" },
@@ -1104,7 +1135,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                                 React.createElement("select", { value: fs.selectedWaterStoreId, onChange: e => setFs(p => ({ ...p, selectedWaterStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('water').map(s => React.createElement("option", { key: s.id, value: s.id },
                                     s.name,
                                     " (",
-                                    (s.maxCapacity - s.water).toFixed(1),
+                                    (getStorageCapacity(s, 'water') - s.water).toFixed(1),
                                     "gal frei)"))),
                                 React.createElement("button", { onClick: storeW, className: "bg-accent text-bg-secondary px-3 py-1 rounded text-sm font-bold" }, "OK")))),
                     React.createElement("button", { onClick: discardFor, className: "w-full bg-accent text-bg-secondary font-bold py-2 rounded-lg" }, "Schlie\u00DFen")))))),
@@ -1186,8 +1217,9 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                     React.createElement("button", { onClick: startFor, className: "text-xs bg-green-700 text-white px-2 py-1 rounded" }, "\uD83C\uDF3F Suchen"),
                     React.createElement("button", { onClick: addS, className: "text-xs bg-glass px-2 py-1 rounded border" }, "+ Lager"))),
             React.createElement("div", { className: "space-y-3" }, storages.map((s, idx) => {
+                const currentCapacity = getStorageCapacity(s);
                 const cl = s.storageType === 'water' ? s.water : (s.food + (s.feed || 0) * FEED_WEIGHT_LB);
-                const full = cl >= s.maxCapacity;
+                const full = cl >= currentCapacity;
                 return (React.createElement("div", { key: s.id, className: `bg-glass p-3 rounded-lg border ${!s.isActive ? 'opacity-50 grayscale' : ''}` },
                     React.createElement("div", { className: "flex justify-between items-center mb-2" },
                         React.createElement("div", { className: "flex items-center gap-2 flex-grow" },
@@ -1201,11 +1233,11 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                             React.createElement("button", { onClick: () => storTypeChange(s.id, 'water'), className: `px-2 py-0.5 rounded ${s.storageType === 'water' ? 'bg-accent text-bg-secondary font-bold' : ''}` }, "Wasser")),
                         React.createElement("div", null,
                             "Kap: ",
-                            React.createElement("input", { type: "number", step: "1", value: s.maxCapacity, onChange: e => numChange(s.id, 'maxCapacity', e.target.value, setStorages), className: "w-10 bg-transparent text-white text-right" }),
+                            React.createElement("input", { type: "number", step: "1", value: currentCapacity, onChange: e => capacityChange(s.id, e.target.value), className: "w-10 bg-transparent text-white text-right" }),
                             " ",
                             s.storageType === 'water' ? 'gal' : 'lb')),
                     React.createElement("div", { className: "w-full bg-input-bg h-1 rounded-full overflow-hidden mb-3" },
-                        React.createElement("div", { className: `h-full ${full ? 'bg-bad' : 'bg-good'}`, style: { width: `${Math.min(100, (cl / s.maxCapacity) * 100)}%` } })),
+                        React.createElement("div", { className: `h-full ${full ? 'bg-bad' : 'bg-good'}`, style: { width: `${Math.min(100, (cl / Math.max(0.001, currentCapacity)) * 100)}%` } })),
                     React.createElement("div", { className: "grid grid-cols-2 gap-2" }, s.storageType === 'food_feed' ? (React.createElement(React.Fragment, null,
                         React.createElement("div", null,
                             React.createElement("label", { className: "text-[10px] text-muted block" }, "Essen (lb)"),
@@ -1421,8 +1453,8 @@ const DEFAULT_GAME_STATE = {
     matrix: JSON.parse(JSON.stringify(DEFAULTS)),
     creatures: [{ id: '1', name: 'Pferd', size: 'Large', usesFeed: true, conMod: 2, daysWithoutFood: 0, exhaustion: emptyExhaustion() }, { id: '2', name: 'Abenteurer', size: 'Medium', usesFeed: false, conMod: 1, daysWithoutFood: 0, exhaustion: emptyExhaustion() }],
     storages: [
-        { id: '1', name: 'Wagen — Essen & Futter', isActive: true, storageType: 'food_feed', maxCapacity: 200, food: 50, water: 0, feed: 7 },
-        { id: '2', name: 'Wasserfass', isActive: true, storageType: 'water', maxCapacity: 60, food: 0, water: 20, feed: 0 }
+        { id: '1', name: 'Wagen — Essen & Futter', isActive: true, storageType: 'food_feed', maxCapacity: 200, maxCapacityFoodFeed: 200, maxCapacityWater: 60, food: 50, water: 0, feed: 7 },
+        { id: '2', name: 'Wasserfass', isActive: true, storageType: 'water', maxCapacity: 60, maxCapacityFoodFeed: 100, maxCapacityWater: 60, food: 0, water: 20, feed: 0 }
     ]
 };
 const getSaveIndex = () => { try {
