@@ -151,7 +151,9 @@ const calcRationTotals = (creatures, selections, isHot = false) => (creatures ||
 }, { food: 0, feed: 0, water: 0 });
 const calcTotalStored = (storages) => (storages || []).reduce((a, s) => {
     if (!s.isActive) return a;
-    return { food: a.food + safeFloat(s.food), water: a.water + safeFloat(s.water), feed: a.feed + safeFloat(s.feed || 0) };
+    if (!s.storageType) return { food: a.food + safeFloat(s.food), water: a.water + safeFloat(s.water), feed: a.feed + safeFloat(s.feed || 0) };
+    if (s.storageType === 'water') return { ...a, water: a.water + safeFloat(s.water) };
+    return { ...a, food: a.food + safeFloat(s.food), feed: a.feed + safeFloat(s.feed || 0) };
 }, { food: 0, water: 0, feed: 0 });
 const applyDailyRationConsumption = ({ creatures, storages, selections, isHot = false }) => {
     const need = calcRationTotals(creatures, selections, isHot);
@@ -162,10 +164,11 @@ const applyDailyRationConsumption = ({ creatures, storages, selections, isHot = 
     let foodNeed = need.food, feedNeed = need.feed, waterNeed = need.water;
     for (const st of newStorages) {
         if (!st.isActive) continue;
+        const stType = st.storageType || 'mixed';
         let sf = safeFloat(st.food), sfe = safeFloat(st.feed || 0), sw = safeFloat(st.water);
-        if (foodNeed > eps && sf > eps) { const take = Math.min(sf, foodNeed); sf -= take; foodNeed -= take; }
-        if (feedNeed > eps && sfe > eps) { const take = Math.min(sfe, feedNeed); sfe -= take; feedNeed -= take; }
-        if (waterNeed > eps && sw > eps) { const take = Math.min(sw, waterNeed); sw -= take; waterNeed -= take; }
+        if ((stType === 'food_feed' || stType === 'mixed') && foodNeed > eps && sf > eps) { const take = Math.min(sf, foodNeed); sf -= take; foodNeed -= take; }
+        if ((stType === 'food_feed' || stType === 'mixed') && feedNeed > eps && sfe > eps) { const take = Math.min(sfe, feedNeed); sfe -= take; feedNeed -= take; }
+        if ((stType === 'water' || stType === 'mixed') && waterNeed > eps && sw > eps) { const take = Math.min(sw, waterNeed); sw -= take; waterNeed -= take; }
         st.food = Math.round(sf * 100) / 100; st.feed = Math.round(sfe * 100) / 100; st.water = Math.round(sw * 100) / 100;
     }
     const logs = [];
@@ -773,7 +776,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
         setFs(p => ({ ...p, selectedFoodStoreId: af.length ? af[0].id : '', selectedWaterStoreId: aw.length ? aw[0].id : '' }));
     } }, [fs.step, storages]);
     const numChange = (id, field, vs, setter) => setter(p => p.map(item => item.id !== id ? item : { ...item, [field]: vs === '' ? 0 : (isNaN(parseFloat(vs)) ? 0 : parseFloat(vs)) }));
-    const storTypeChange = (id, nt) => setStorages(p => p.map(s => s.id !== id ? s : { ...s, storageType: nt, food: nt === 'water' ? 0 : s.food, feed: nt === 'water' ? 0 : s.feed, water: nt === 'food_feed' ? 0 : s.water }));
+    const storTypeChange = (id, nt) => setStorages(p => p.map(s => s.id !== id ? s : { ...s, storageType: nt }));
     const addC = () => setCreatures(p => [...p, { id: generateId(), name: 'Neuer Charakter', size: 'Medium', usesFeed: false, conMod: 0, daysWithoutFood: 0, exhaustion: emptyExhaustion() }]);
     const updC = (id, f, v) => setCreatures(p => p.map(c => c.id === id ? { ...c, [f]: v } : c));
     const remC = (id) => triggerModal('confirm', 'Löschen', 'Eintrag wirklich löschen?', () => setCreatures(p => p.filter(c => c.id !== id)));
@@ -783,6 +786,14 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
     const getReq = (c) => getCreatureReq(c, isHot);
     const totalNeeds = useMemo(() => creatures.reduce((a, c) => { const r = getReq(c); return { food: a.food + r.food, water: a.water + r.water, feed: a.feed + r.feed }; }, { food: 0, water: 0, feed: 0 }), [creatures, isHot]);
     const totalStored = useMemo(() => calcTotalStored(storages), [storages]);
+    const supplyDays = useMemo(() => {
+        const dayValue = (stored, need) => need > 0 ? stored / need : null;
+        const values = { food: dayValue(totalStored.food, totalNeeds.food), feed: dayValue(totalStored.feed, totalNeeds.feed), water: dayValue(totalStored.water, totalNeeds.water) };
+        const relevant = Object.values(values).filter(v => v !== null);
+        return { ...values, limiting: relevant.length ? Math.min(...relevant) : null };
+    }, [totalStored, totalNeeds]);
+    const fmtSupplyDays = (days) => days === null ? '—' : days < 10 ? days.toFixed(1) : Math.floor(days).toString();
+    const supplyDaysClass = (days) => days === null ? 'text-muted' : days < 1 ? 'text-bad' : days < 3 ? 'text-amber-400' : 'text-good';
     const openRat = () => { const is = {}; creatures.forEach(c => { is[c.id] = { food: true, water: true }; }); setRat({ isOpen: true, selections: is }); };
     const ratTotals = useMemo(() => { if (!rat.isOpen)
         return { food: 0, feed: 0, water: 0 }; return creatures.reduce((a, c) => { const s = rat.selections[c.id]; if (!s)
@@ -1000,6 +1011,21 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                             React.createElement("span", { className: totalStored.water < totalNeeds.water ? 'text-bad font-bold' : '' },
                                 "\uD83D\uDCA7 ",
                                 totalStored.water.toFixed(1))))),
+                    React.createElement("div", { className: "mt-3 pt-3 border-t border-border-color" },
+                        React.createElement("div", { className: "flex justify-between items-center mb-2" },
+                            React.createElement("span", { className: "text-muted" }, "Reichweite:"),
+                            React.createElement("span", { className: `${supplyDaysClass(supplyDays.limiting)} font-bold` },
+                                supplyDays.limiting === null ? 'Keine Verbraucher' : `Limit ${fmtSupplyDays(supplyDays.limiting)} Tage`)),
+                        React.createElement("div", { className: "grid grid-cols-3 gap-2 text-center" },
+                            React.createElement("div", { className: "bg-glass rounded-lg p-2" },
+                                React.createElement("div", { className: "text-[10px] text-muted" }, "Essen"),
+                                React.createElement("div", { className: `${supplyDaysClass(supplyDays.food)} font-bold` }, fmtSupplyDays(supplyDays.food), supplyDays.food !== null && "d")),
+                            React.createElement("div", { className: "bg-glass rounded-lg p-2" },
+                                React.createElement("div", { className: "text-[10px] text-muted" }, "Futter"),
+                                React.createElement("div", { className: `${supplyDaysClass(supplyDays.feed)} font-bold` }, fmtSupplyDays(supplyDays.feed), supplyDays.feed !== null && "d")),
+                            React.createElement("div", { className: "bg-glass rounded-lg p-2" },
+                                React.createElement("div", { className: "text-[10px] text-muted" }, "Wasser"),
+                                React.createElement("div", { className: `${supplyDaysClass(supplyDays.water)} font-bold` }, fmtSupplyDays(supplyDays.water), supplyDays.water !== null && "d")))),
                 React.createElement("button", { onClick: openRat, disabled: creatures.length === 0, className: "w-full bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold py-3 rounded-lg" }, "Tagesration verbrauchen"),
                 lastSS && React.createElement("button", { onClick: undo, className: "w-full mt-2 text-muted text-sm hover:text-white transition-colors" }, "Widerrufen")))),
         React.createElement("div", { className: "bg-card rounded-xl p-4 shadow-lg h-fit min-w-0" },
@@ -1239,7 +1265,10 @@ const DEFAULT_GAME_STATE = {
     party: [{ id: '1', name: 'Charakter 1', pp: 14, vision: 'none' }, { id: '2', name: 'Charakter 2', pp: 12, vision: 'none' }],
     matrix: JSON.parse(JSON.stringify(DEFAULTS)),
     creatures: [{ id: '1', name: 'Pferd', size: 'Large', usesFeed: true, conMod: 2, daysWithoutFood: 0, exhaustion: emptyExhaustion() }, { id: '2', name: 'Abenteurer', size: 'Medium', usesFeed: false, conMod: 1, daysWithoutFood: 0, exhaustion: emptyExhaustion() }],
-    storages: [{ id: '1', name: 'Wagen', isActive: true, storageType: 'food_feed', maxCapacity: 200, food: 50, water: 20, feed: 7 }]
+    storages: [
+        { id: '1', name: 'Wagen — Essen & Futter', isActive: true, storageType: 'food_feed', maxCapacity: 200, food: 50, water: 0, feed: 7 },
+        { id: '2', name: 'Wasserfass', isActive: true, storageType: 'water', maxCapacity: 60, food: 0, water: 20, feed: 0 }
+    ]
 };
 const getSaveIndex = () => { try {
     return JSON.parse(localStorage.getItem(SAVE_INDEX_KEY)) || [];
