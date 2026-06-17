@@ -71,6 +71,11 @@ const CONSUMPTION_RATES = {
     'Huge': { food: 16, water: 16, feed: 4.0 }, 'Gargantuan': { food: 64, water: 64, feed: 16.0 }
 };
 const FEED_WEIGHT_LB = 10;
+const RATION_FOOD_LB = 2;
+const foodLbToRations = (lb) => Math.round((safeFloat(lb) / RATION_FOOD_LB) * 100) / 100;
+const rationsToFoodLb = (rations) => Math.round(safeFloat(rations) * RATION_FOOD_LB * 100) / 100;
+const fmtRations = (rations) => fmt(rations, 2);
+const fmtFoodNeed = (rations) => `${fmtRations(rations)} Rationen (= ${fmt(rationsToFoodLb(rations), 2)} lb Nahrung)`;
 
 const MAX_TRAVEL_HOURS = 8;
 const FORCED_MARCH_BASE_DC = 10;
@@ -141,8 +146,10 @@ const removeOneLongRestExhaustion = (parts, canFood, canWater) => {
     return { parts: ex, removed: null };
 };
 const getCreatureReq = (c, isHot = false) => {
+    // CONSUMPTION_RATES.food is RAW lb Nahrung/Tag. Stored food is tracked as Rationen.
+    // 1 Ration = 2 lb Nahrung, so a Medium creature consumes 0.5 Rationen/day.
     const r = CONSUMPTION_RATES[c.size] || CONSUMPTION_RATES['Medium'];
-    return { food: c.usesFeed ? 0 : r.food, feed: c.usesFeed ? r.feed : 0, water: isHot ? r.water * 2 : r.water };
+    return { food: c.usesFeed ? 0 : foodLbToRations(r.food), feed: c.usesFeed ? r.feed : 0, water: isHot ? r.water * 2 : r.water };
 };
 const calcRationTotals = (creatures, selections, isHot = false) => (creatures || []).reduce((a, c) => {
     const s = selections?.[c.id]; if (!s) return a;
@@ -169,22 +176,75 @@ const getStorageCapacity = (storage, type = storage?.storageType || 'food_feed')
     if ((storage.storageType || 'food_feed') === 'food_feed' && hasStorageValue(storage.maxCapacity)) return safeFloat(storage.maxCapacity);
     return fallback;
 };
-const applyDailyRationConsumption = ({ creatures, storages, selections, isHot = false }) => {
+const RESOURCE_LABELS = { food: 'Rationen', feed: 'Futter', water: 'Wasser' };
+const RESOURCE_UNITS = { food: ' Rationen', feed: ' Unit', water: 'gal' };
+const isStorageValidForResource = (storage, type) => {
+    if (!storage || !storage.isActive) return false;
+    const stType = storage.storageType || 'mixed';
+    if (type === 'water') return stType === 'water' || stType === 'mixed';
+    return stType === 'food_feed' || stType === 'mixed';
+};
+const getActiveStoragesForResource = (storages, type) => (storages || []).filter(s => isStorageValidForResource(s, type));
+const getStorageResourceAmount = (storage, type) => {
+    if (!storage) return 0;
+    if (type === 'water') return safeFloat(storage.water);
+    if (type === 'feed') return safeFloat(storage.feed || 0);
+    return safeFloat(storage.food);
+};
+const setStorageResourceAmount = (storage, type, value) => {
+    const v = Math.round(Math.max(0, value) * 100) / 100;
+    if (type === 'water') storage.water = v;
+    else if (type === 'feed') storage.feed = v;
+    else storage.food = v;
+};
+const uniqueRouteIds = (ids) => {
+    const seen = new Set();
+    const out = [];
+    (ids || []).forEach(id => { if (id && !seen.has(id)) { seen.add(id); out.push(id); } });
+    return out;
+};
+const calcRouteAvailable = (storages, routeIds, type) => uniqueRouteIds(routeIds).reduce((sum, id) => {
+    const st = (storages || []).find(s => s.id === id);
+    return isStorageValidForResource(st, type) ? sum + getStorageResourceAmount(st, type) : sum;
+}, 0);
+const consumeResourceFromRoute = (newStorages, type, amount, sourceRoutes) => {
+    const eps = 0.001;
+    let remaining = amount;
+    const routeIds = sourceRoutes ? uniqueRouteIds(sourceRoutes[type]) : null;
+    const candidates = routeIds
+        ? routeIds.map(id => newStorages.find(s => s.id === id)).filter(s => isStorageValidForResource(s, type))
+        : getActiveStoragesForResource(newStorages, type);
+    const logs = [];
+    for (const st of candidates) {
+        if (remaining <= eps) break;
+        const available = getStorageResourceAmount(st, type);
+        if (available <= eps) continue;
+        const take = Math.min(available, remaining);
+        setStorageResourceAmount(st, type, available - take);
+        remaining -= take;
+        logs.push(`${RESOURCE_LABELS[type]}: ${type === 'food' ? fmtRations(take) : fmt(take)}${RESOURCE_UNITS[type]} aus ${st.name || 'Unbenanntes Lager'}.`);
+    }
+    return { remaining: Math.max(0, remaining), logs };
+};
+const applyDailyRationConsumption = ({ creatures, storages, selections, isHot = false, sourceRoutes = null }) => {
     const need = calcRationTotals(creatures, selections, isHot);
     const stored = calcTotalStored(storages);
     const eps = 0.001;
-    if (need.food > stored.food + eps || need.feed > stored.feed + eps || need.water > stored.water + eps) return { ok: false, reason: 'Nicht genug Vorräte für die gewählte Versorgung.', need, stored };
-    const newStorages = (storages || []).map(s => ({ ...s }));
-    let foodNeed = need.food, feedNeed = need.feed, waterNeed = need.water;
-    for (const st of newStorages) {
-        if (!st.isActive) continue;
-        const stType = st.storageType || 'mixed';
-        let sf = safeFloat(st.food), sfe = safeFloat(st.feed || 0), sw = safeFloat(st.water);
-        if ((stType === 'food_feed' || stType === 'mixed') && foodNeed > eps && sf > eps) { const take = Math.min(sf, foodNeed); sf -= take; foodNeed -= take; }
-        if ((stType === 'food_feed' || stType === 'mixed') && feedNeed > eps && sfe > eps) { const take = Math.min(sfe, feedNeed); sfe -= take; feedNeed -= take; }
-        if ((stType === 'water' || stType === 'mixed') && waterNeed > eps && sw > eps) { const take = Math.min(sw, waterNeed); sw -= take; waterNeed -= take; }
-        st.food = Math.round(sf * 100) / 100; st.feed = Math.round(sfe * 100) / 100; st.water = Math.round(sw * 100) / 100;
+    const routeMode = !!sourceRoutes;
+    const available = routeMode ? {
+        food: calcRouteAvailable(storages, sourceRoutes.food, 'food'),
+        feed: calcRouteAvailable(storages, sourceRoutes.feed, 'feed'),
+        water: calcRouteAvailable(storages, sourceRoutes.water, 'water')
+    } : stored;
+    if (need.food > available.food + eps || need.feed > available.feed + eps || need.water > available.water + eps) {
+        return { ok: false, reason: routeMode ? 'Die ausgewählten Lager decken den Verbrauch nicht vollständig.' : 'Nicht genug Vorräte für die gewählte Versorgung.', need, stored, available };
     }
+    const newStorages = (storages || []).map(s => ({ ...s }));
+    const storageLogs = [];
+    const f = consumeResourceFromRoute(newStorages, 'food', need.food, sourceRoutes); storageLogs.push(...f.logs);
+    const fe = consumeResourceFromRoute(newStorages, 'feed', need.feed, sourceRoutes); storageLogs.push(...fe.logs);
+    const w = consumeResourceFromRoute(newStorages, 'water', need.water, sourceRoutes); storageLogs.push(...w.logs);
+    if (f.remaining > eps || fe.remaining > eps || w.remaining > eps) return { ok: false, reason: 'Die gewählten Lager konnten nicht korrekt verbraucht werden.', need, stored, available };
     const logs = [];
     const newCreatures = (creatures || []).map(raw => {
         const c = normalizeCreature(raw);
@@ -205,7 +265,7 @@ const applyDailyRationConsumption = ({ creatures, storages, selections, isHot = 
         if (gained.length || removed || beforeTotal !== afterTotal) logs.push(`${c.name || 'Unbenannt'}: Exhaustion ${beforeTotal}→${afterTotal}${gained.length ? ` (${gained.join(', ')})` : ''}${removed ? `, Long Rest entfernt 1× ${EXHAUSTION_LABELS[removed]}` : ''}.`);
         return { ...c, daysWithoutFood, exhaustion: ex };
     });
-    return { ok: true, creatures: newCreatures, storages: newStorages, need, stored, logs };
+    return { ok: true, creatures: newCreatures, storages: newStorages, need, stored, available, logs, storageLogs };
 };
 const ExhaustionBadges = ({ creature, compact = false }) => {
     const ex = getExhaustionParts(creature); const total = totalExhaustionFromParts(ex);
@@ -932,10 +992,10 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
     const [cMsg, setCMsg] = useState(null);
     const isHot = !!resourceSettings?.isHot;
     const setIsHot = (value) => setResourceSettings(prev => ({ ...(prev || {}), isHot: value }));
-    const [rat, setRat] = useState({ isOpen: false, selections: {} });
+    const [rat, setRat] = useState({ isOpen: false, step: 'select', selections: {}, sourceRoutes: { food: [], feed: [], water: [] } });
     const [fs, setFs] = useState({ step: 'idle', dc: 15, wisMod: 0, checkResult: 0, foodFound: 0, waterFound: 0, mishap: false, selectedFoodStoreId: '', selectedWaterStoreId: '', isRanger: false });
     const getAvail = (type) => storages.filter(s => { if (!s.isActive || s.storageType !== type)
-        return false; const cl = type === 'water' ? s.water : (s.food + (s.feed || 0) * FEED_WEIGHT_LB); return cl < getStorageCapacity(s, type); });
+        return false; const cl = type === 'water' ? s.water : (rationsToFoodLb(s.food) + (s.feed || 0) * FEED_WEIGHT_LB); return cl < getStorageCapacity(s, type); });
     useEffect(() => { if (fs.step === 'result') {
         const af = getAvail('food_feed'), aw = getAvail('water');
         setFs(p => ({ ...p, selectedFoodStoreId: af.length ? af[0].id : '', selectedWaterStoreId: aw.length ? aw[0].id : '' }));
@@ -976,24 +1036,134 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
     }, [totalStored, totalNeeds]);
     const fmtSupplyDays = (days) => days === null ? '—' : days < 10 ? days.toFixed(1) : Math.floor(days).toString();
     const supplyDaysClass = (days) => days === null ? 'text-muted' : days < 1 ? 'text-bad' : days < 3 ? 'text-amber-400' : 'text-good';
-    const openRat = () => { const is = {}; creatures.forEach(c => { is[c.id] = { food: true, water: true }; }); setRat({ isOpen: true, selections: is }); };
+    const closeRat = () => setRat({ isOpen: false, step: 'select', selections: {}, sourceRoutes: { food: [], feed: [], water: [] } });
+    const openRat = () => { const is = {}; creatures.forEach(c => { is[c.id] = { food: true, water: true }; }); setRat({ isOpen: true, step: 'select', selections: is, sourceRoutes: { food: [], feed: [], water: [] } }); };
     const ratTotals = useMemo(() => { if (!rat.isOpen)
         return { food: 0, feed: 0, water: 0 }; return creatures.reduce((a, c) => { const s = rat.selections[c.id]; if (!s)
         return a; const r = getReq(c); return { food: a.food + (s.food ? r.food : 0), feed: a.feed + (s.food ? r.feed : 0), water: a.water + (s.water ? r.water : 0) }; }, { food: 0, feed: 0, water: 0 }); }, [rat, creatures, isHot]);
     const togSel = (cid, type) => setRat(p => ({ ...p, selections: { ...p.selections, [cid]: { ...p.selections[cid], [type]: !p.selections[cid][type] } } }));
+    const routeNeed = (type) => ratTotals[type] || 0;
+    const routeIds = (type) => rat.sourceRoutes?.[type] || [];
+    const sourceOptions = (type) => getActiveStoragesForResource(storages, type).filter(s => getStorageResourceAmount(s, type) > 0.001);
+    const routeCoverage = (type, ids = routeIds(type)) => calcRouteAvailable(storages, ids, type);
+    const buildAutoRoute = (type, need) => {
+        if (need <= 0.001) return [];
+        const route = [];
+        let covered = 0;
+        for (const st of sourceOptions(type)) {
+            if (covered >= need - 0.001) break;
+            route.push(st.id);
+            covered += getStorageResourceAmount(st, type);
+        }
+        return route;
+    };
+    const goSourceStep = () => {
+        const eps = 0.001;
+        if (ratTotals.food > totalStored.food + eps || ratTotals.feed > totalStored.feed + eps || ratTotals.water > totalStored.water + eps) {
+            triggerModal('alert', 'Nicht genug Vorräte', 'Die aktiven Lager enthalten nicht genug Vorräte für diese Auswahl.');
+            return;
+        }
+        setRat(p => ({ ...p, step: 'sources', sourceRoutes: {
+            food: buildAutoRoute('food', ratTotals.food),
+            feed: buildAutoRoute('feed', ratTotals.feed),
+            water: buildAutoRoute('water', ratTotals.water)
+        } }));
+    };
+    const toggleRouteStore = (type, id) => setRat(p => {
+        const current = p.sourceRoutes?.[type] || [];
+        const next = current.includes(id) ? current.filter(x => x !== id) : [...current, id];
+        return { ...p, sourceRoutes: { ...(p.sourceRoutes || {}), [type]: next } };
+    });
+    const moveRouteStore = (type, index, dir) => setRat(p => {
+        const current = [...(p.sourceRoutes?.[type] || [])];
+        const target = index + dir;
+        if (target < 0 || target >= current.length) return p;
+        [current[index], current[target]] = [current[target], current[index]];
+        return { ...p, sourceRoutes: { ...(p.sourceRoutes || {}), [type]: current } };
+    });
+    const sourceRoutesReady = ['food', 'feed', 'water'].every(type => routeCoverage(type) + 0.001 >= routeNeed(type));
+    const sourceRoutePanel = (type, label, unit) => {
+        const need = routeNeed(type);
+        const options = sourceOptions(type);
+        const selected = routeIds(type);
+        const covered = routeCoverage(type);
+        const ok = covered + 0.001 >= need;
+        const fmtAmt = (value) => type === 'food' ? fmtRations(value) : fmt(value);
+        return React.createElement("div", { key: type, className: `bg-glass rounded-lg border ${ok ? 'border-border-color' : 'border-bad/50'} p-3` },
+            React.createElement("div", { className: "flex justify-between items-start gap-2 mb-2" },
+                React.createElement("div", null,
+                    React.createElement("div", { className: "font-bold text-white" }, label),
+                    React.createElement("div", { className: "text-xs text-muted" }, need <= 0.001 ? 'Kein Bedarf' : `Bedarf: ${fmtAmt(need)}${unit}`)),
+                React.createElement("div", { className: `text-sm font-bold ${ok ? 'text-good' : 'text-bad'}` }, `${fmtAmt(covered)}/${fmtAmt(need)}${unit}`)),
+            need > 0.001 && React.createElement(React.Fragment, null,
+                React.createElement("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3" }, options.length ? options.map(st => {
+                    const idx = selected.indexOf(st.id);
+                    const active = idx !== -1;
+                    return React.createElement("button", { key: st.id, onClick: () => toggleRouteStore(type, st.id), className: `text-left p-2 rounded border text-sm transition-colors ${active ? 'bg-accent/15 border-accent text-white' : 'bg-input-bg border-border-color text-muted hover:text-white'}` },
+                        React.createElement("div", { className: "flex justify-between gap-2" },
+                            React.createElement("span", { className: "font-semibold truncate" }, active ? `${idx + 1}. ${st.name || 'Unbenannt'}` : st.name || 'Unbenannt'),
+                            React.createElement("span", { className: active ? 'text-accent font-bold' : 'text-muted' }, active ? '✓' : '+')),
+                        React.createElement("div", { className: "text-[11px] text-muted" }, `${fmtAmt(getStorageResourceAmount(st, type))}${unit} verfügbar`));
+                }) : React.createElement("div", { className: "col-span-2 text-sm text-bad bg-bad/10 border border-bad/30 rounded p-2" }, "Kein passendes aktives Lager mit Vorrat.")),
+                React.createElement("div", { className: "space-y-1" },
+                    React.createElement("div", { className: "text-[10px] text-muted uppercase tracking-wide" }, "Entnahme-Reihenfolge"),
+                    selected.length ? selected.map((id, idx) => {
+                        const st = storages.find(s => s.id === id);
+                        return React.createElement("div", { key: id, className: "flex items-center gap-2 bg-card/60 rounded p-2 border border-border-color" },
+                            React.createElement(MoveButtons, { index: idx, length: selected.length, onMove: d => moveRouteStore(type, idx, d) }),
+                            React.createElement("div", { className: "flex-grow min-w-0" },
+                                React.createElement("div", { className: "text-sm font-semibold text-white truncate" }, `${idx + 1}. ${st?.name || 'Gelöschtes Lager'}`),
+                                React.createElement("div", { className: "text-[11px] text-muted" }, `${fmtAmt(getStorageResourceAmount(st, type))}${unit} verfügbar`)),
+                            React.createElement("button", { onClick: () => toggleRouteStore(type, id), className: "text-muted hover:text-bad px-2" }, "×"));
+                    }) : React.createElement("div", { className: "text-sm text-muted italic" }, "Noch kein Lager ausgewählt."))));
+    };
+    const rationSelectionContent = () => React.createElement("div", { className: "overflow-y-auto flex-grow mb-4 border border-border-color rounded-lg" },
+        React.createElement("table", { className: "w-full text-sm text-left" },
+            React.createElement("thead", { className: "bg-white/5 text-muted sticky top-0" },
+                React.createElement("tr", null,
+                    React.createElement("th", { className: "p-3" }, "Name"),
+                    React.createElement("th", { className: "p-3 text-center" }, "Status"),
+                    React.createElement("th", { className: "p-3 text-center" }, "Rationen/Futter"),
+                    React.createElement("th", { className: "p-3 text-center" }, "Wasser"))),
+            React.createElement("tbody", { className: "divide-y divide-border-color" }, creatures.map(c => {
+                const r = getReq(c), s = rat.selections[c.id];
+                if (!s) return null;
+                return React.createElement("tr", { key: c.id, className: "hover:bg-white/5" },
+                    React.createElement("td", { className: "p-3 font-medium" }, c.name),
+                    React.createElement("td", { className: "p-3 text-center" },
+                        React.createElement("div", { className: "flex justify-center gap-2 flex-wrap" },
+                            c.daysWithoutFood > 0 && React.createElement("span", { className: "text-orange-400 text-xs px-1.5 py-0.5 bg-orange-400/10 rounded" }, "Hunger ", c.daysWithoutFood, "d"),
+                            React.createElement(ExhaustionBadges, { creature: c, compact: true }),
+                            c.daysWithoutFood === 0 && totalExhaustion(c) === 0 && React.createElement("span", { className: "text-muted text-xs" }, "-"))),
+                    React.createElement("td", { className: "p-3 text-center" },
+                        React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
+                            React.createElement("input", { type: "checkbox", checked: s.food, onChange: () => togSel(c.id, 'food'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-good mb-1" }),
+                            React.createElement("span", { className: "text-xs text-muted" }, c.usesFeed ? `${r.feed} Unit` : `${fmtRations(r.food)} Rationen`))),
+                    React.createElement("td", { className: "p-3 text-center" },
+                        React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
+                            React.createElement("input", { type: "checkbox", checked: s.water, onChange: () => togSel(c.id, 'water'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-accent mb-1" }),
+                            React.createElement("span", { className: "text-xs text-muted" }, r.water, " gal"))));
+            }))));
+    const rationSourceContent = () => React.createElement("div", { className: "overflow-y-auto flex-grow mb-4 space-y-3 pr-1" },
+        React.createElement("div", { className: "text-sm text-muted bg-glass border border-border-color rounded-lg p-3" },
+            "Wähle pro Vorratsart die Lager in der gewünschten Entnahme-Reihenfolge. Die App leert zuerst Lager 1, dann Lager 2, usw."),
+        sourceRoutePanel('food', 'Rationen', ' Rationen'),
+        sourceRoutePanel('feed', 'Futter', ' Unit'),
+        sourceRoutePanel('water', 'Wasser', 'gal'));
     const confirmCon = () => {
         setLastSS(JSON.parse(JSON.stringify(storages)));
         setLastCS(JSON.parse(JSON.stringify(creatures)));
-        const result = applyDailyRationConsumption({ creatures, storages, selections: rat.selections, isHot });
+        const result = applyDailyRationConsumption({ creatures, storages, selections: rat.selections, isHot, sourceRoutes: rat.sourceRoutes });
         if (!result.ok)
             return triggerModal('alert', 'Nicht genug Vorräte', result.reason || 'Nicht genug Vorräte für die gewählte Versorgung.');
         setStorages(result.storages);
         setCreatures(result.creatures);
-        setRat({ isOpen: false, selections: {} });
+        closeRat();
         const fc = Object.values(rat.selections).filter(s => s.food).length;
         const wc = Object.values(rat.selections).filter(s => s.water).length;
         setCMsg(`Tagesabschluss: ${fc}/${creatures.length} Nahrung/Futter, ${wc}/${creatures.length} Wasser.`);
-        addLog(`Tagesabschluss: ${fmt(result.need.food)}lb Essen, ${fmt(result.need.feed)} Futter, ${fmt(result.need.water)}gal Wasser verbraucht.`);
+        addLog(`Tagesabschluss: ${fmtFoodNeed(result.need.food)}, ${fmt(result.need.feed)} Futter, ${fmt(result.need.water)}gal Wasser verbraucht.`);
+        (result.storageLogs || []).forEach(addLog);
         result.logs.forEach(addLog);
         setTimeout(() => setCMsg(null), 5000);
     };
@@ -1011,76 +1181,41 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
     } setFs(p => ({ ...p, step: 'result', foodFound: f, waterFound: w, mishap: m })); };
     const storeF = () => { const t = fs.selectedFoodStoreId; if (!t)
         return; const ts = storages.find(s => s.id === t); if (!ts)
-        return; const cl = ts.food + (ts.feed || 0) * FEED_WEIGHT_LB; const sp = getStorageCapacity(ts, 'food_feed') - cl; const ta = Math.min(sp, fs.foodFound); if (ta <= 0) {
+        return; const cl = rationsToFoodLb(ts.food) + (ts.feed || 0) * FEED_WEIGHT_LB; const sp = getStorageCapacity(ts, 'food_feed') - cl; const ta = Math.min(sp, fs.foodFound); if (ta <= 0) {
         triggerModal('alert', 'Voll', 'Lager voll.');
         return;
-    } setStorages(p => p.map(s => s.id === t ? { ...s, food: s.food + ta } : s)); setFs(p => ({ ...p, foodFound: p.foodFound - ta })); };
+    } setStorages(p => p.map(s => s.id === t ? { ...s, food: safeFloat(s.food) + foodLbToRations(ta) } : s)); setFs(p => ({ ...p, foodFound: Math.round((p.foodFound - ta) * 100) / 100 })); addLog(`Nahrungssuche: ${fmt(ta)}lb Nahrung eingelagert → +${fmt(foodLbToRations(ta))} Rationen.`); };
     const storeW = () => { const t = fs.selectedWaterStoreId; if (!t)
         return; const ts = storages.find(s => s.id === t); if (!ts)
         return; const sp = getStorageCapacity(ts, 'water') - ts.water; const ta = Math.min(sp, fs.waterFound); if (ta <= 0) {
         triggerModal('alert', 'Voll', 'Lager voll.');
         return;
     } setStorages(p => p.map(s => s.id === t ? { ...s, water: s.water + ta } : s)); setFs(p => ({ ...p, waterFound: p.waterFound - ta })); };
-    const discardFor = () => triggerModal('confirm', 'Wegwerfen?', `${fs.foodFound}lb Essen und ${fs.waterFound}gal Wasser zurücklassen?`, () => setFs(p => ({ ...p, step: 'idle' })));
+    const discardFor = () => triggerModal('confirm', 'Wegwerfen?', `${fs.foodFound}lb Nahrung und ${fs.waterFound}gal Wasser zurücklassen?`, () => setFs(p => ({ ...p, step: 'idle' })));
     return (React.createElement("div", { className: "grid grid-cols-1 xl:grid-cols-[minmax(560px,0.95fr)_minmax(620px,1.05fr)] gap-4 items-start" },
         rat.isOpen && (React.createElement("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" },
-            React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-2xl w-full p-6 flex flex-col max-h-[90vh]" },
-                React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Rationierung & Verbrauch"),
+            React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-4xl w-full p-6 flex flex-col max-h-[90vh]" },
+                React.createElement("h3", { className: "text-xl font-bold mb-2 text-white" }, rat.step === 'sources' ? "Lager-Auswahl & Entnahme-Reihenfolge" : "Rationierung & Verbrauch"),
+                React.createElement("div", { className: "text-xs text-muted mb-4" }, rat.step === 'sources' ? "Schritt 2/2 — aus welchen Lagern wird verbraucht?" : "Schritt 1/2 — wer bekommt Nahrung/Futter und Wasser?"),
                 React.createElement("div", { className: "grid grid-cols-3 gap-4 mb-4 text-center bg-glass p-3 rounded-lg" },
                     React.createElement("div", null,
-                        React.createElement("div", { className: "text-xs text-muted" }, "Essen"),
-                        React.createElement("div", { className: `${ratTotals.food > totalStored.food ? 'text-bad' : 'text-white'} font-bold` },
-                            ratTotals.food.toFixed(1),
-                            "/",
-                            totalStored.food.toFixed(1))),
+                        React.createElement("div", { className: "text-xs text-muted" }, "Rationen"),
+                        React.createElement("div", { className: `${ratTotals.food > totalStored.food ? 'text-bad' : 'text-white'} font-bold` }, fmtRations(ratTotals.food), "/", fmtRations(totalStored.food))),
                     React.createElement("div", null,
                         React.createElement("div", { className: "text-xs text-muted" }, "Futter"),
-                        React.createElement("div", { className: `${ratTotals.feed > totalStored.feed ? 'text-bad' : 'text-white'} font-bold` },
-                            ratTotals.feed.toFixed(1),
-                            "/",
-                            totalStored.feed.toFixed(1))),
+                        React.createElement("div", { className: `${ratTotals.feed > totalStored.feed ? 'text-bad' : 'text-white'} font-bold` }, ratTotals.feed.toFixed(1), "/", totalStored.feed.toFixed(1))),
                     React.createElement("div", null,
                         React.createElement("div", { className: "text-xs text-muted" }, "Wasser"),
-                        React.createElement("div", { className: `${ratTotals.water > totalStored.water ? 'text-bad' : 'text-white'} font-bold` },
-                            ratTotals.water.toFixed(1),
-                            "/",
-                            totalStored.water.toFixed(1)))),
-                React.createElement("div", { className: "overflow-y-auto flex-grow mb-4 border border-border-color rounded-lg" },
-                    React.createElement("table", { className: "w-full text-sm text-left" },
-                        React.createElement("thead", { className: "bg-white/5 text-muted sticky top-0" },
-                            React.createElement("tr", null,
-                                React.createElement("th", { className: "p-3" }, "Name"),
-                                React.createElement("th", { className: "p-3 text-center" }, "Status"),
-                                React.createElement("th", { className: "p-3 text-center" }, "Essen"),
-                                React.createElement("th", { className: "p-3 text-center" }, "Wasser"))),
-                        React.createElement("tbody", { className: "divide-y divide-border-color" }, creatures.map(c => {
-                            const r = getReq(c), s = rat.selections[c.id];
-                            if (!s)
-                                return null;
-                            return (React.createElement("tr", { key: c.id, className: "hover:bg-white/5" },
-                                React.createElement("td", { className: "p-3 font-medium" }, c.name),
-                                React.createElement("td", { className: "p-3 text-center" },
-                                    React.createElement("div", { className: "flex justify-center gap-2 flex-wrap" },
-                                        c.daysWithoutFood > 0 && React.createElement("span", { className: "text-orange-400 text-xs px-1.5 py-0.5 bg-orange-400/10 rounded" },
-                                            "Hunger ",
-                                            c.daysWithoutFood,
-                                            "d"),
-                                        React.createElement(ExhaustionBadges, { creature: c, compact: true }),
-                                        c.daysWithoutFood === 0 && totalExhaustion(c) === 0 && React.createElement("span", { className: "text-muted text-xs" }, "-"))),
-                                React.createElement("td", { className: "p-3 text-center" },
-                                    React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
-                                        React.createElement("input", { type: "checkbox", checked: s.food, onChange: () => togSel(c.id, 'food'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-good mb-1" }),
-                                        React.createElement("span", { className: "text-xs text-muted" }, c.usesFeed ? `${r.feed} Unit` : `${r.food} lb`))),
-                                React.createElement("td", { className: "p-3 text-center" },
-                                    React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
-                                        React.createElement("input", { type: "checkbox", checked: s.water, onChange: () => togSel(c.id, 'water'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-accent mb-1" }),
-                                        React.createElement("span", { className: "text-xs text-muted" },
-                                            r.water,
-                                            " gal")))));
-                        })))),
-                React.createElement("div", { className: "flex gap-2" },
-                    React.createElement("button", { onClick: confirmCon, disabled: ratTotals.food > totalStored.food + 0.001 || ratTotals.feed > totalStored.feed + 0.001 || ratTotals.water > totalStored.water + 0.001, className: "flex-1 bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold py-3 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" }, "Best\u00E4tigen"),
-                    React.createElement("button", { onClick: () => setRat({ isOpen: false, selections: {} }), className: "px-4 py-3 border border-border-color rounded-lg text-muted hover:bg-glass" }, "Abbrechen"))))),
+                        React.createElement("div", { className: `${ratTotals.water > totalStored.water ? 'text-bad' : 'text-white'} font-bold` }, ratTotals.water.toFixed(1), "/", totalStored.water.toFixed(1)))),
+                rat.step === 'sources' ? rationSourceContent() : rationSelectionContent(),
+                rat.step === 'sources'
+                    ? React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("button", { onClick: confirmCon, disabled: !sourceRoutesReady, className: "flex-1 bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold py-3 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" }, "Verbrauch bestätigen"),
+                        React.createElement("button", { onClick: () => setRat(p => ({ ...p, step: 'select' })), className: "px-4 py-3 border border-border-color rounded-lg text-muted hover:bg-glass" }, "Zurück"),
+                        React.createElement("button", { onClick: closeRat, className: "px-4 py-3 border border-border-color rounded-lg text-muted hover:bg-glass" }, "Abbrechen"))
+                    : React.createElement("div", { className: "flex gap-2" },
+                        React.createElement("button", { onClick: goSourceStep, disabled: ratTotals.food > totalStored.food + 0.001 || ratTotals.feed > totalStored.feed + 0.001 || ratTotals.water > totalStored.water + 0.001, className: "flex-1 bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold py-3 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" }, "Weiter: Lager wählen"),
+                        React.createElement("button", { onClick: closeRat, className: "px-4 py-3 border border-border-color rounded-lg text-muted hover:bg-glass" }, "Abbrechen"))))),
         fs.step !== 'idle' && (React.createElement("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" },
             React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto" },
                 fs.step === 'config' && (React.createElement(React.Fragment, null,
@@ -1110,17 +1245,19 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                     React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Ergebnis"),
                     React.createElement("div", { className: "mb-6 bg-glass p-4 rounded-lg text-center" }, fs.mishap ? React.createElement("div", { className: "text-bad font-bold" }, "MISSGESCHICK!") : React.createElement("div", { className: "text-white" },
                         fs.foodFound,
-                        "lb Essen, ",
+                        "lb Nahrung, ",
                         fs.waterFound,
                         "gal Wasser")),
                     !fs.mishap && React.createElement("div", { className: "space-y-4 mb-4" },
                         fs.foodFound > 0 && React.createElement("div", { className: "bg-glass p-3 rounded-lg" },
                             React.createElement("label", { className: "text-xs text-muted block mb-1" },
-                                "Essen (",
+                                "Nahrung gefunden (",
                                 fs.foodFound,
-                                "lb)"),
+                                "lb → ",
+                                fmtRations(foodLbToRations(fs.foodFound)),
+                                " Rationen)"),
                             React.createElement("div", { className: "flex gap-2" },
-                                React.createElement("select", { value: fs.selectedFoodStoreId, onChange: e => setFs(p => ({ ...p, selectedFoodStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('food_feed').map(s => { const cl = s.food + (s.feed || 0) * FEED_WEIGHT_LB; return React.createElement("option", { key: s.id, value: s.id },
+                                React.createElement("select", { value: fs.selectedFoodStoreId, onChange: e => setFs(p => ({ ...p, selectedFoodStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('food_feed').map(s => { const cl = rationsToFoodLb(s.food) + (s.feed || 0) * FEED_WEIGHT_LB; return React.createElement("option", { key: s.id, value: s.id },
                                     s.name,
                                     " (",
                                     (getStorageCapacity(s, 'food_feed') - cl).toFixed(1),
@@ -1174,7 +1311,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                         React.createElement("div", { className: "flex gap-3" },
                             React.createElement("span", null,
                                 "\uD83C\uDF54 ",
-                                totalNeeds.food.toFixed(1)),
+                                fmtRations(totalNeeds.food)),
                             React.createElement("span", null,
                                 "\uD83C\uDF3E ",
                                 totalNeeds.feed.toFixed(1)),
@@ -1186,7 +1323,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                         React.createElement("div", { className: "flex gap-3" },
                             React.createElement("span", { className: totalStored.food < totalNeeds.food ? 'text-bad font-bold' : '' },
                                 "\uD83C\uDF54 ",
-                                totalStored.food.toFixed(1)),
+                                fmtRations(totalStored.food)),
                             React.createElement("span", { className: totalStored.feed < totalNeeds.feed ? 'text-bad font-bold' : '' },
                                 "\uD83C\uDF3E ",
                                 totalStored.feed.toFixed(1)),
@@ -1200,7 +1337,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                                 supplyDays.limiting === null ? 'Keine Verbraucher' : `Limit ${fmtSupplyDays(supplyDays.limiting)} Tage`)),
                         React.createElement("div", { className: "grid grid-cols-3 gap-2 text-center" },
                             React.createElement("div", { className: "bg-glass rounded-lg p-2" },
-                                React.createElement("div", { className: "text-[10px] text-muted" }, "Essen"),
+                                React.createElement("div", { className: "text-[10px] text-muted" }, "Rationen"),
                                 React.createElement("div", { className: `${supplyDaysClass(supplyDays.food)} font-bold` }, fmtSupplyDays(supplyDays.food), supplyDays.food !== null && "d")),
                             React.createElement("div", { className: "bg-glass rounded-lg p-2" },
                                 React.createElement("div", { className: "text-[10px] text-muted" }, "Futter"),
@@ -1218,7 +1355,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                     React.createElement("button", { onClick: addS, className: "text-xs bg-glass px-2 py-1 rounded border" }, "+ Lager"))),
             React.createElement("div", { className: "space-y-3" }, storages.map((s, idx) => {
                 const currentCapacity = getStorageCapacity(s);
-                const cl = s.storageType === 'water' ? s.water : (s.food + (s.feed || 0) * FEED_WEIGHT_LB);
+                const cl = s.storageType === 'water' ? s.water : (rationsToFoodLb(s.food) + (s.feed || 0) * FEED_WEIGHT_LB);
                 const full = cl >= currentCapacity;
                 return (React.createElement("div", { key: s.id, className: `bg-glass p-3 rounded-lg border ${!s.isActive ? 'opacity-50 grayscale' : ''}` },
                     React.createElement("div", { className: "flex justify-between items-center mb-2" },
@@ -1229,19 +1366,20 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                         React.createElement("button", { onClick: () => remS(s.id), className: "text-muted" }, "\u00D7")),
                     React.createElement("div", { className: "flex justify-between text-[10px] text-muted mb-1" },
                         React.createElement("div", { className: "flex bg-input-bg rounded p-0.5" },
-                            React.createElement("button", { onClick: () => storTypeChange(s.id, 'food_feed'), className: `px-2 py-0.5 rounded ${s.storageType === 'food_feed' ? 'bg-accent text-bg-secondary font-bold' : ''}` }, "Essen"),
+                            React.createElement("button", { onClick: () => storTypeChange(s.id, 'food_feed'), className: `px-2 py-0.5 rounded ${s.storageType === 'food_feed' ? 'bg-accent text-bg-secondary font-bold' : ''}` }, "Rationen"),
                             React.createElement("button", { onClick: () => storTypeChange(s.id, 'water'), className: `px-2 py-0.5 rounded ${s.storageType === 'water' ? 'bg-accent text-bg-secondary font-bold' : ''}` }, "Wasser")),
                         React.createElement("div", null,
                             "Kap: ",
                             React.createElement("input", { type: "number", step: "1", value: currentCapacity, onChange: e => capacityChange(s.id, e.target.value), className: "w-10 bg-transparent text-white text-right" }),
                             " ",
-                            s.storageType === 'water' ? 'gal' : 'lb')),
+                            s.storageType === 'water' ? 'gal' : 'lb Kap.')),
                     React.createElement("div", { className: "w-full bg-input-bg h-1 rounded-full overflow-hidden mb-3" },
                         React.createElement("div", { className: `h-full ${full ? 'bg-bad' : 'bg-good'}`, style: { width: `${Math.min(100, (cl / Math.max(0.001, currentCapacity)) * 100)}%` } })),
                     React.createElement("div", { className: "grid grid-cols-2 gap-2" }, s.storageType === 'food_feed' ? (React.createElement(React.Fragment, null,
                         React.createElement("div", null,
-                            React.createElement("label", { className: "text-[10px] text-muted block" }, "Essen (lb)"),
-                            React.createElement("input", { type: "number", step: "1", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.food, onChange: e => numChange(s.id, 'food', e.target.value, setStorages) })),
+                            React.createElement("label", { className: "text-[10px] text-muted block" }, "Rationen"),
+                            React.createElement("input", { type: "number", step: "0.5", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.food, onChange: e => numChange(s.id, 'food', e.target.value, setStorages) }),
+                            React.createElement("div", { className: "text-[10px] text-muted mt-0.5" }, `${fmt(rationsToFoodLb(s.food))} lb Nahrung`)),
                         React.createElement("div", null,
                             React.createElement("label", { className: "text-[10px] text-muted block" }, "Futter (Unit)"),
                             React.createElement("input", { type: "number", step: "1", className: "w-full bg-input-bg rounded p-1 text-sm text-white", value: s.feed || 0, onChange: e => numChange(s.id, 'feed', e.target.value, setStorages) })))) : (React.createElement("div", { className: "col-span-2" },
@@ -1420,14 +1558,14 @@ const DayCloseModal = ({ state, setState, creatures, storages, isHot, onConfirm,
                     e('p', { className: 'text-sm text-muted' }, 'Die Gruppe verbraucht Rationen. Danach wird der Nachtwurf ausgeführt und ein neuer Tag beginnt.')),
                 e('button', { onClick: onClose, className: 'text-muted hover:text-white text-xl' }, '×')),
             e('div', { className: 'grid grid-cols-3 gap-3 mb-4 text-center bg-glass p-3 rounded-lg' },
-                e('div', null, e('div', { className: 'text-xs text-muted' }, 'Essen'), e('div', { className: `${totals.food > stored.food ? 'text-bad' : 'text-white'} font-bold` }, fmt(totals.food), '/', fmt(stored.food))),
+                e('div', null, e('div', { className: 'text-xs text-muted' }, 'Rationen'), e('div', { className: `${totals.food > stored.food ? 'text-bad' : 'text-white'} font-bold` }, fmt(totals.food), '/', fmt(stored.food))),
                 e('div', null, e('div', { className: 'text-xs text-muted' }, 'Futter'), e('div', { className: `${totals.feed > stored.feed ? 'text-bad' : 'text-white'} font-bold` }, fmt(totals.feed), '/', fmt(stored.feed))),
                 e('div', null, e('div', { className: 'text-xs text-muted' }, 'Wasser'), e('div', { className: `${totals.water > stored.water ? 'text-bad' : 'text-white'} font-bold` }, fmt(totals.water), '/', fmt(stored.water)))) ,
             shortage && e('div', { className: 'mb-3 p-2 rounded bg-bad/20 border border-bad/40 text-bad text-sm' }, 'Nicht genug Vorräte. Wähle einzelne Verbraucher ab oder fülle Vorräte auf.'),
             e('div', { className: 'overflow-y-auto border border-border-color rounded-lg divide-y divide-border-color mb-4' },
                 (creatures || []).map(raw => { const c = normalizeCreature(raw); const r = getCreatureReq(c, isHot); const s = selections[c.id] || { food: false, water: false }; return e('div', { key: c.id, className: 'grid grid-cols-[1fr,100px,100px] gap-2 items-center p-3 hover:bg-white/5' },
                     e('div', { className: 'min-w-0' }, e('div', { className: 'font-bold text-white truncate' }, c.name || 'Unbenannt'), e(ExhaustionBadges, { creature: c, compact: true })),
-                    e('label', { className: 'flex flex-col items-center cursor-pointer' }, e('input', { type: 'checkbox', checked: s.food, onChange: () => toggle(c.id, 'food'), className: 'w-5 h-5 mb-1' }), e('span', { className: 'text-xs text-muted' }, c.usesFeed ? `${r.feed} Futter` : `${r.food} lb`)),
+                    e('label', { className: 'flex flex-col items-center cursor-pointer' }, e('input', { type: 'checkbox', checked: s.food, onChange: () => toggle(c.id, 'food'), className: 'w-5 h-5 mb-1' }), e('span', { className: 'text-xs text-muted' }, c.usesFeed ? `${r.feed} Futter` : `${fmtRations(r.food)} Rationen`)),
                     e('label', { className: 'flex flex-col items-center cursor-pointer' }, e('input', { type: 'checkbox', checked: s.water, onChange: () => toggle(c.id, 'water'), className: 'w-5 h-5 mb-1' }), e('span', { className: 'text-xs text-muted' }, `${r.water} gal`)) ); })
             ),
             e('div', { className: 'flex gap-2' },
@@ -1453,7 +1591,7 @@ const DEFAULT_GAME_STATE = {
     matrix: JSON.parse(JSON.stringify(DEFAULTS)),
     creatures: [{ id: '1', name: 'Pferd', size: 'Large', usesFeed: true, conMod: 2, daysWithoutFood: 0, exhaustion: emptyExhaustion() }, { id: '2', name: 'Abenteurer', size: 'Medium', usesFeed: false, conMod: 1, daysWithoutFood: 0, exhaustion: emptyExhaustion() }],
     storages: [
-        { id: '1', name: 'Wagen — Essen & Futter', isActive: true, storageType: 'food_feed', maxCapacity: 200, maxCapacityFoodFeed: 200, maxCapacityWater: 60, food: 50, water: 0, feed: 7 },
+        { id: '1', name: 'Wagen — Rationen & Futter', isActive: true, storageType: 'food_feed', maxCapacity: 200, maxCapacityFoodFeed: 200, maxCapacityWater: 60, food: 50, water: 0, feed: 7 },
         { id: '2', name: 'Wasserfass', isActive: true, storageType: 'water', maxCapacity: 60, maxCapacityFoodFeed: 100, maxCapacityWater: 60, food: 0, water: 20, feed: 0 }
     ]
 };
@@ -1919,7 +2057,8 @@ const App = () => {
         setStorages(result.storages);
         setCreatures(result.creatures);
         closeDayClose();
-        addLog(`Tagesabschluss vor Long Rest: ${fmt(result.need.food)}lb Essen, ${fmt(result.need.feed)} Futter, ${fmt(result.need.water)}gal Wasser verbraucht.`);
+        addLog(`Tagesabschluss vor Long Rest: ${fmtFoodNeed(result.need.food)}, ${fmt(result.need.feed)} Futter, ${fmt(result.need.water)}gal Wasser verbraucht.`);
+        (result.storageLogs || []).forEach(addLog);
         result.logs.forEach(addLog);
         addLog(`Long Rest: Tag ${journey.day} endet. Neuer Tag: ${safeFloat(journey.day) + 1}.`);
         setJourney(prev => ({ ...prev, day: safeFloat(prev.day) + 1, hoursTraveledToday: 0 }));
