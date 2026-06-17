@@ -74,8 +74,7 @@ const FEED_WEIGHT_LB = 10;
 const RATION_FOOD_LB = 2;
 const foodLbToRations = (lb) => Math.round((safeFloat(lb) / RATION_FOOD_LB) * 100) / 100;
 const rationsToFoodLb = (rations) => Math.round(safeFloat(rations) * RATION_FOOD_LB * 100) / 100;
-const fmtRations = (rations) => fmt(rations, 2);
-const fmtFoodNeed = (rations) => `${fmtRations(rations)} Rationen (= ${fmt(rationsToFoodLb(rations), 2)} lb Nahrung)`;
+const fmtFoodNeed = (rations) => `${fmt(rations)} Rationen (= ${fmt(rationsToFoodLb(rations))} lb Nahrung)`;
 
 const MAX_TRAVEL_HOURS = 8;
 const FORCED_MARCH_BASE_DC = 10;
@@ -222,7 +221,7 @@ const consumeResourceFromRoute = (newStorages, type, amount, sourceRoutes) => {
         const take = Math.min(available, remaining);
         setStorageResourceAmount(st, type, available - take);
         remaining -= take;
-        logs.push(`${RESOURCE_LABELS[type]}: ${type === 'food' ? fmtRations(take) : fmt(take)}${RESOURCE_UNITS[type]} aus ${st.name || 'Unbenanntes Lager'}.`);
+        logs.push(`${RESOURCE_LABELS[type]}: ${fmt(take)}${RESOURCE_UNITS[type]} aus ${st.name || 'Unbenanntes Lager'}.`);
     }
     return { remaining: Math.max(0, remaining), logs };
 };
@@ -1088,13 +1087,12 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
         const selected = routeIds(type);
         const covered = routeCoverage(type);
         const ok = covered + 0.001 >= need;
-        const fmtAmt = (value) => type === 'food' ? fmtRations(value) : fmt(value);
         return React.createElement("div", { key: type, className: `bg-glass rounded-lg border ${ok ? 'border-border-color' : 'border-bad/50'} p-3` },
             React.createElement("div", { className: "flex justify-between items-start gap-2 mb-2" },
                 React.createElement("div", null,
                     React.createElement("div", { className: "font-bold text-white" }, label),
-                    React.createElement("div", { className: "text-xs text-muted" }, need <= 0.001 ? 'Kein Bedarf' : `Bedarf: ${fmtAmt(need)}${unit}`)),
-                React.createElement("div", { className: `text-sm font-bold ${ok ? 'text-good' : 'text-bad'}` }, `${fmtAmt(covered)}/${fmtAmt(need)}${unit}`)),
+                    React.createElement("div", { className: "text-xs text-muted" }, need <= 0.001 ? 'Kein Bedarf' : `Bedarf: ${fmt(need)}${unit}`)),
+                React.createElement("div", { className: `text-sm font-bold ${ok ? 'text-good' : 'text-bad'}` }, `${fmt(covered)}/${fmt(need)}${unit}`)),
             need > 0.001 && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3" }, options.length ? options.map(st => {
                     const idx = selected.indexOf(st.id);
@@ -1103,7 +1101,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                         React.createElement("div", { className: "flex justify-between gap-2" },
                             React.createElement("span", { className: "font-semibold truncate" }, active ? `${idx + 1}. ${st.name || 'Unbenannt'}` : st.name || 'Unbenannt'),
                             React.createElement("span", { className: active ? 'text-accent font-bold' : 'text-muted' }, active ? '✓' : '+')),
-                        React.createElement("div", { className: "text-[11px] text-muted" }, `${fmtAmt(getStorageResourceAmount(st, type))}${unit} verfügbar`));
+                        React.createElement("div", { className: "text-[11px] text-muted" }, `${fmt(getStorageResourceAmount(st, type))}${unit} verfügbar`));
                 }) : React.createElement("div", { className: "col-span-2 text-sm text-bad bg-bad/10 border border-bad/30 rounded p-2" }, "Kein passendes aktives Lager mit Vorrat.")),
                 React.createElement("div", { className: "space-y-1" },
                     React.createElement("div", { className: "text-[10px] text-muted uppercase tracking-wide" }, "Entnahme-Reihenfolge"),
@@ -1113,7 +1111,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                             React.createElement(MoveButtons, { index: idx, length: selected.length, onMove: d => moveRouteStore(type, idx, d) }),
                             React.createElement("div", { className: "flex-grow min-w-0" },
                                 React.createElement("div", { className: "text-sm font-semibold text-white truncate" }, `${idx + 1}. ${st?.name || 'Gelöschtes Lager'}`),
-                                React.createElement("div", { className: "text-[11px] text-muted" }, `${fmtAmt(getStorageResourceAmount(st, type))}${unit} verfügbar`)),
+                                React.createElement("div", { className: "text-[11px] text-muted" }, `${fmt(getStorageResourceAmount(st, type))}${unit} verfügbar`)),
                             React.createElement("button", { onClick: () => toggleRouteStore(type, id), className: "text-muted hover:text-bad px-2" }, "×"));
                     }) : React.createElement("div", { className: "text-sm text-muted italic" }, "Noch kein Lager ausgewählt."))));
     };
@@ -1123,7 +1121,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                 React.createElement("tr", null,
                     React.createElement("th", { className: "p-3" }, "Name"),
                     React.createElement("th", { className: "p-3 text-center" }, "Status"),
-                    React.createElement("th", { className: "p-3 text-center" }, "Rationen/Futter"),
+                    React.createElement("th", { className: "p-3 text-center" }, "Essen"),
                     React.createElement("th", { className: "p-3 text-center" }, "Wasser"))),
             React.createElement("tbody", { className: "divide-y divide-border-color" }, creatures.map(c => {
                 const r = getReq(c), s = rat.selections[c.id];
@@ -1138,7 +1136,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                     React.createElement("td", { className: "p-3 text-center" },
                         React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
                             React.createElement("input", { type: "checkbox", checked: s.food, onChange: () => togSel(c.id, 'food'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-good mb-1" }),
-                            React.createElement("span", { className: "text-xs text-muted" }, c.usesFeed ? `${r.feed} Unit` : `${fmtRations(r.food)} Rationen`))),
+                            React.createElement("span", { className: "text-xs text-muted" }, c.usesFeed ? `${r.feed} Unit` : `${fmt(r.food)} Rationen`))),
                     React.createElement("td", { className: "p-3 text-center" },
                         React.createElement("label", { className: "flex flex-col items-center cursor-pointer group" },
                             React.createElement("input", { type: "checkbox", checked: s.water, onChange: () => togSel(c.id, 'water'), className: "w-5 h-5 rounded border-border-color bg-input-bg checked:bg-accent mb-1" }),
@@ -1200,7 +1198,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                 React.createElement("div", { className: "grid grid-cols-3 gap-4 mb-4 text-center bg-glass p-3 rounded-lg" },
                     React.createElement("div", null,
                         React.createElement("div", { className: "text-xs text-muted" }, "Rationen"),
-                        React.createElement("div", { className: `${ratTotals.food > totalStored.food ? 'text-bad' : 'text-white'} font-bold` }, fmtRations(ratTotals.food), "/", fmtRations(totalStored.food))),
+                        React.createElement("div", { className: `${ratTotals.food > totalStored.food ? 'text-bad' : 'text-white'} font-bold` }, ratTotals.food.toFixed(1), "/", totalStored.food.toFixed(1))),
                     React.createElement("div", null,
                         React.createElement("div", { className: "text-xs text-muted" }, "Futter"),
                         React.createElement("div", { className: `${ratTotals.feed > totalStored.feed ? 'text-bad' : 'text-white'} font-bold` }, ratTotals.feed.toFixed(1), "/", totalStored.feed.toFixed(1))),
@@ -1254,10 +1252,10 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                                 "Nahrung gefunden (",
                                 fs.foodFound,
                                 "lb → ",
-                                fmtRations(foodLbToRations(fs.foodFound)),
+                                fmt(foodLbToRations(fs.foodFound)),
                                 " Rationen)"),
                             React.createElement("div", { className: "flex gap-2" },
-                                React.createElement("select", { value: fs.selectedFoodStoreId, onChange: e => setFs(p => ({ ...p, selectedFoodStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('food_feed').map(s => { const cl = rationsToFoodLb(s.food) + (s.feed || 0) * FEED_WEIGHT_LB; return React.createElement("option", { key: s.id, value: s.id },
+                                React.createElement("select", { value: fs.selectedFoodStoreId, onChange: e => setFs(p => ({ ...p, selectedFoodStoreId: e.target.value })), className: "flex-grow bg-bg-secondary text-white p-2 rounded text-sm" }, getAvail('food_feed').map(s => { const cl = s.food + (s.feed || 0) * FEED_WEIGHT_LB; return React.createElement("option", { key: s.id, value: s.id },
                                     s.name,
                                     " (",
                                     (getStorageCapacity(s, 'food_feed') - cl).toFixed(1),
@@ -1311,7 +1309,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                         React.createElement("div", { className: "flex gap-3" },
                             React.createElement("span", null,
                                 "\uD83C\uDF54 ",
-                                fmtRations(totalNeeds.food)),
+                                totalNeeds.food.toFixed(1)),
                             React.createElement("span", null,
                                 "\uD83C\uDF3E ",
                                 totalNeeds.feed.toFixed(1)),
@@ -1323,7 +1321,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
                         React.createElement("div", { className: "flex gap-3" },
                             React.createElement("span", { className: totalStored.food < totalNeeds.food ? 'text-bad font-bold' : '' },
                                 "\uD83C\uDF54 ",
-                                fmtRations(totalStored.food)),
+                                totalStored.food.toFixed(1)),
                             React.createElement("span", { className: totalStored.feed < totalNeeds.feed ? 'text-bad font-bold' : '' },
                                 "\uD83C\uDF3E ",
                                 totalStored.feed.toFixed(1)),
@@ -1565,7 +1563,7 @@ const DayCloseModal = ({ state, setState, creatures, storages, isHot, onConfirm,
             e('div', { className: 'overflow-y-auto border border-border-color rounded-lg divide-y divide-border-color mb-4' },
                 (creatures || []).map(raw => { const c = normalizeCreature(raw); const r = getCreatureReq(c, isHot); const s = selections[c.id] || { food: false, water: false }; return e('div', { key: c.id, className: 'grid grid-cols-[1fr,100px,100px] gap-2 items-center p-3 hover:bg-white/5' },
                     e('div', { className: 'min-w-0' }, e('div', { className: 'font-bold text-white truncate' }, c.name || 'Unbenannt'), e(ExhaustionBadges, { creature: c, compact: true })),
-                    e('label', { className: 'flex flex-col items-center cursor-pointer' }, e('input', { type: 'checkbox', checked: s.food, onChange: () => toggle(c.id, 'food'), className: 'w-5 h-5 mb-1' }), e('span', { className: 'text-xs text-muted' }, c.usesFeed ? `${r.feed} Futter` : `${fmtRations(r.food)} Rationen`)),
+                    e('label', { className: 'flex flex-col items-center cursor-pointer' }, e('input', { type: 'checkbox', checked: s.food, onChange: () => toggle(c.id, 'food'), className: 'w-5 h-5 mb-1' }), e('span', { className: 'text-xs text-muted' }, c.usesFeed ? `${r.feed} Futter` : `${fmt(r.food)} Rationen`)),
                     e('label', { className: 'flex flex-col items-center cursor-pointer' }, e('input', { type: 'checkbox', checked: s.water, onChange: () => toggle(c.id, 'water'), className: 'w-5 h-5 mb-1' }), e('span', { className: 'text-xs text-muted' }, `${r.water} gal`)) ); })
             ),
             e('div', { className: 'flex gap-2' },
@@ -1579,6 +1577,7 @@ const DayCloseModal = ({ state, setState, creatures, storages, isHot, onConfirm,
 const SAVE_INDEX_KEY = 'enc_saves_index';
 const SAVE_DATA_PREFIX = 'enc_save_';
 const ACTIVE_SAVE_KEY = 'enc_active_save';
+const SAVE_SCHEMA_VERSION = 4;
 const DEFAULT_GAME_STATE = {
     settings: { terrain: 'road', pace: 'normal', vehicle: 'no', travelLighting: 'bright', longRestHours: 8, watchCount: 3, lightHoursOverride: null, watches: [
         { durationHours: 3, hasLight: false, lighting: 'darkness', members: [{ name: '', vision: 'none', pp: 12 }] },
@@ -1591,9 +1590,64 @@ const DEFAULT_GAME_STATE = {
     matrix: JSON.parse(JSON.stringify(DEFAULTS)),
     creatures: [{ id: '1', name: 'Pferd', size: 'Large', usesFeed: true, conMod: 2, daysWithoutFood: 0, exhaustion: emptyExhaustion() }, { id: '2', name: 'Abenteurer', size: 'Medium', usesFeed: false, conMod: 1, daysWithoutFood: 0, exhaustion: emptyExhaustion() }],
     storages: [
-        { id: '1', name: 'Wagen — Rationen & Futter', isActive: true, storageType: 'food_feed', maxCapacity: 200, maxCapacityFoodFeed: 200, maxCapacityWater: 60, food: 50, water: 0, feed: 7 },
+        { id: '1', name: 'Wagen — Essen & Futter', isActive: true, storageType: 'food_feed', maxCapacity: 200, maxCapacityFoodFeed: 200, maxCapacityWater: 60, food: 50, water: 0, feed: 7 },
         { id: '2', name: 'Wasserfass', isActive: true, storageType: 'water', maxCapacity: 60, maxCapacityFoodFeed: 100, maxCapacityWater: 60, food: 0, water: 20, feed: 0 }
     ]
+};
+const cloneGameData = (value) => JSON.parse(JSON.stringify(value));
+const normalizeStorages = (storages) => {
+    const source = Array.isArray(storages) ? storages : DEFAULT_GAME_STATE.storages;
+    return source.map((raw, idx) => {
+        const s = raw || {};
+        const inferredType = s.storageType || ((safeFloat(s.water) > 0 && safeFloat(s.food) <= 0 && safeFloat(s.feed || 0) <= 0) ? 'water' : 'food_feed');
+        const storageType = inferredType === 'water' ? 'water' : 'food_feed';
+        const foodCap = hasStorageValue(s.maxCapacityFoodFeed)
+            ? safeFloat(s.maxCapacityFoodFeed)
+            : (storageType === 'food_feed' && hasStorageValue(s.maxCapacity) ? safeFloat(s.maxCapacity) : DEFAULT_STORAGE_CAPACITY.food_feed);
+        const waterCap = hasStorageValue(s.maxCapacityWater)
+            ? safeFloat(s.maxCapacityWater)
+            : (storageType === 'water' && hasStorageValue(s.maxCapacity) ? safeFloat(s.maxCapacity) : DEFAULT_STORAGE_CAPACITY.water);
+        const activeCap = storageType === 'water' ? waterCap : foodCap;
+        return {
+            ...s,
+            id: s.id || generateId(),
+            name: s.name || `Lager ${idx + 1}`,
+            isActive: s.isActive !== false,
+            storageType,
+            maxCapacity: activeCap,
+            maxCapacityFoodFeed: foodCap,
+            maxCapacityWater: waterCap,
+            food: safeFloat(s.food),
+            water: safeFloat(s.water),
+            feed: safeFloat(s.feed || 0)
+        };
+    });
+};
+const normalizeSettingsState = (settings) => {
+    const base = cloneGameData(DEFAULT_GAME_STATE.settings);
+    const src = settings || {};
+    const watches = normalizeWatches(src.watches || base.watches);
+    return {
+        ...base,
+        ...src,
+        longRestHours: getLongRestHours(src.longRestHours !== undefined ? src : base),
+        watches,
+        watchCount: watches.length,
+        lightHoursOverride: src.lightHoursOverride ?? base.lightHoursOverride
+    };
+};
+const normalizeGameState = (data) => {
+    const src = data || {};
+    return {
+        schemaVersion: SAVE_SCHEMA_VERSION,
+        settings: normalizeSettingsState(src.settings),
+        journey: { ...cloneGameData(DEFAULT_GAME_STATE.journey), ...(src.journey || {}) },
+        resourceSettings: { ...cloneGameData(DEFAULT_GAME_STATE.resourceSettings), ...(src.resourceSettings || {}) },
+        party: Array.isArray(src.party) ? src.party : cloneGameData(DEFAULT_GAME_STATE.party),
+        matrix: src.matrix || cloneGameData(DEFAULT_GAME_STATE.matrix),
+        creatures: normalizeCreatures(src.creatures || cloneGameData(DEFAULT_GAME_STATE.creatures)),
+        storages: normalizeStorages(src.storages || cloneGameData(DEFAULT_GAME_STATE.storages))
+    };
 };
 const getSaveIndex = () => { try {
     return JSON.parse(localStorage.getItem(SAVE_INDEX_KEY)) || [];
@@ -1624,7 +1678,7 @@ const SaveManager = ({ isOpen, onClose, currentState, onLoadState, triggerModal 
     const flushActiveSave = () => {
         const activeId = getActiveSaveId();
         if (activeId) {
-            const state = currentState();
+            const state = normalizeGameState(currentState());
             setSaveData(activeId, state);
         }
     };
@@ -1632,7 +1686,7 @@ const SaveManager = ({ isOpen, onClose, currentState, onLoadState, triggerModal 
         const id = generateId();
         const name = `Spielstand ${saves.length + 1}`;
         const entry = { id, name, timestamp: Date.now() };
-        const state = currentState();
+        const state = normalizeGameState(currentState());
         const newIndex = [...saves, entry];
         setSaveIndex(newIndex);
         setSaveData(id, state);
@@ -1641,7 +1695,7 @@ const SaveManager = ({ isOpen, onClose, currentState, onLoadState, triggerModal 
     };
     const handleOverwrite = (id) => {
         triggerModal('confirm', 'Überschreiben', 'Diesen Spielstand mit dem aktuellen Stand überschreiben?', () => {
-            const state = currentState();
+            const state = normalizeGameState(currentState());
             setSaveData(id, state);
             const newIndex = saves.map(s => s.id === id ? { ...s, timestamp: Date.now() } : s);
             setSaveIndex(newIndex);
@@ -1680,10 +1734,11 @@ const SaveManager = ({ isOpen, onClose, currentState, onLoadState, triggerModal 
     const handleExport = (id, name) => {
         // For active save, use live state instead of potentially stale localStorage
         const activeId = getActiveSaveId();
-        const data = (id === activeId) ? currentState() : getSaveData(id);
-        if (!data)
+        const rawData = (id === activeId) ? currentState() : getSaveData(id);
+        if (!rawData)
             return triggerModal('alert', 'Fehler', 'Spielstand enthält keine Daten.');
-        const blob = new Blob([JSON.stringify({ name, version: 3, data }, null, 2)], { type: 'application/json' });
+        const data = normalizeGameState(rawData);
+        const blob = new Blob([JSON.stringify({ name, version: SAVE_SCHEMA_VERSION, data }, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1696,12 +1751,14 @@ const SaveManager = ({ isOpen, onClose, currentState, onLoadState, triggerModal 
         flushActiveSave();
         const allData = saves.map(s => {
             const activeId = getActiveSaveId();
-            const data = (s.id === activeId) ? currentState() : getSaveData(s.id);
+            const rawData = (s.id === activeId) ? currentState() : getSaveData(s.id);
+            if (!rawData) return { ...s, data: null };
+            const data = normalizeGameState(rawData);
             return { ...s, data };
         }).filter(s => s.data);
         if (!allData.length)
             return triggerModal('alert', 'Leer', 'Keine Spielstände zum Exportieren.');
-        const blob = new Blob([JSON.stringify({ version: 3, saves: allData }, null, 2)], { type: 'application/json' });
+        const blob = new Blob([JSON.stringify({ version: SAVE_SCHEMA_VERSION, saves: allData }, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1739,11 +1796,12 @@ const SaveManager = ({ isOpen, onClose, currentState, onLoadState, triggerModal 
                         return;
                     const id = generateId();
                     const name = imp.name || `Import ${saves.length + count + 1}`;
-                    setSaveData(id, imp.data);
+                    const cleanData = normalizeGameState(imp.data);
+                    setSaveData(id, cleanData);
                     newIndex.push({ id, name, timestamp: imp.timestamp || Date.now() });
                     if (!firstImportedId) {
                         firstImportedId = id;
-                        firstImportedData = imp.data;
+                        firstImportedData = cleanData;
                     }
                     count++;
                 });
@@ -1820,9 +1878,9 @@ const App = () => {
         if (activeId) {
             const data = getSaveData(activeId);
             if (data)
-                return data;
+                return normalizeGameState(data);
         }
-        return JSON.parse(JSON.stringify(DEFAULT_GAME_STATE));
+        return normalizeGameState(DEFAULT_GAME_STATE);
     };
     const [initialData] = useState(loadInitial);
     const [settings, setSettings] = useState(initialData.settings);
@@ -1835,9 +1893,9 @@ const App = () => {
     const [forcedMarch, setForcedMarch] = useState({ isOpen: false, dc: 10, selected: {}, hourNumber: 1 });
     const [dayClose, setDayClose] = useState({ isOpen: false, selections: {} });
     // Use ref so SaveManager always gets the absolute latest state (no stale closures)
-    const stateRef = useRef({ settings, journey, resourceSettings, party, matrix, creatures, storages });
+    const stateRef = useRef(normalizeGameState({ settings, journey, resourceSettings, party, matrix, creatures, storages }));
     useEffect(() => {
-        stateRef.current = { settings, journey, resourceSettings, party, matrix, creatures, storages };
+        stateRef.current = normalizeGameState({ settings, journey, resourceSettings, party, matrix, creatures, storages });
         // Auto-save to active slot
         const activeId = getActiveSaveId();
         if (activeId) {
@@ -1846,13 +1904,14 @@ const App = () => {
     }, [settings, journey, resourceSettings, party, matrix, creatures, storages]);
     const getCurrentState = () => stateRef.current;
     const loadState = (data) => {
-        const s = data.settings || DEFAULT_GAME_STATE.settings;
-        const j = data.journey || DEFAULT_GAME_STATE.journey;
-        const rs = data.resourceSettings || DEFAULT_GAME_STATE.resourceSettings;
-        const p = data.party || DEFAULT_GAME_STATE.party;
-        const m = data.matrix || JSON.parse(JSON.stringify(DEFAULTS));
-        const c = normalizeCreatures(data.creatures || DEFAULT_GAME_STATE.creatures);
-        const st = data.storages || DEFAULT_GAME_STATE.storages;
+        const clean = normalizeGameState(data);
+        const s = clean.settings;
+        const j = clean.journey;
+        const rs = clean.resourceSettings;
+        const p = clean.party;
+        const m = clean.matrix;
+        const c = clean.creatures;
+        const st = clean.storages;
         setSettings(s);
         setJourney(j);
         setResourceSettings(rs);
@@ -1860,7 +1919,7 @@ const App = () => {
         setMatrix(m);
         setCreatures(c);
         setStorages(st);
-        stateRef.current = { settings: s, journey: j, resourceSettings: rs, party: p, matrix: m, creatures: c, storages: st };
+        stateRef.current = clean;
         setForcedMarch({ isOpen: false, dc: 10, selected: {}, hourNumber: 1 });
         setDayClose({ isOpen: false, selections: {} });
         setFlow(null);
