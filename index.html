@@ -27,6 +27,20 @@
     </script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <style>
+      .resource-grid-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1rem;
+        align-items: start;
+      }
+      @media (min-width: 1200px) {
+        .resource-grid-layout {
+          grid-template-columns: minmax(560px, 0.95fr) minmax(620px, 1.05fr);
+        }
+      }
+    </style>
   </head>
   <body class="bg-gradient-to-b from-bg-secondary to-[#07182a] text-[#e6eef6] font-sans antialiased">
     <div id="root"></div>
@@ -829,7 +843,7 @@ const ResourceManager = ({ creatures, setCreatures, storages, setStorages, resou
         return;
     } setStorages(p => p.map(s => s.id === t ? { ...s, water: s.water + ta } : s)); setFs(p => ({ ...p, waterFound: p.waterFound - ta })); };
     const discardFor = () => triggerModal('confirm', 'Wegwerfen?', `${fs.foodFound}lb Essen und ${fs.waterFound}gal Wasser zurücklassen?`, () => setFs(p => ({ ...p, step: 'idle' })));
-    return (React.createElement("div", { className: "grid grid-cols-1 xl:grid-cols-[minmax(560px,0.95fr)_minmax(620px,1.05fr)] gap-4 items-start" },
+    return (React.createElement("div", { className: "resource-grid-layout" },
         rat.isOpen && (React.createElement("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" },
             React.createElement("div", { className: "bg-card border border-border-color rounded-xl shadow-2xl max-w-2xl w-full p-6 flex flex-col max-h-[90vh]" },
                 React.createElement("h3", { className: "text-xl font-bold mb-4 text-white" }, "Rationierung & Verbrauch"),
