@@ -40,6 +40,39 @@
           grid-template-columns: minmax(560px, 0.95fr) minmax(620px, 1.05fr);
         }
       }
+
+      /* Ressourcen-Tab: falls die Lager-Komponente durch einen JSX-Nesting-Fehler im linken Wrapper landet,
+         erzwingt diese CSS-Regel trotzdem die gewünschte Desktop-Zweispalten-Ansicht. */
+      @media (min-width: 1200px) {
+        .resource-grid-layout > .space-y-4.min-w-0 {
+          grid-column: 1 / -1;
+          display: grid !important;
+          grid-template-columns: minmax(560px, 0.95fr) minmax(620px, 1.05fr);
+          gap: 1rem;
+          align-items: start;
+        }
+        .resource-grid-layout > .space-y-4.min-w-0 > * {
+          margin-top: 0 !important;
+          min-width: 0;
+        }
+        .resource-grid-layout > .space-y-4.min-w-0 > :nth-child(1) {
+          grid-column: 1;
+          grid-row: 1;
+        }
+        .resource-grid-layout > .space-y-4.min-w-0 > :nth-child(2) {
+          grid-column: 1;
+          grid-row: 2;
+        }
+        .resource-grid-layout > .space-y-4.min-w-0 > :nth-child(3) {
+          grid-column: 2;
+          grid-row: 1 / span 2;
+        }
+      }
+      @media (max-width: 1199px) {
+        .resource-grid-layout > .space-y-4.min-w-0 {
+          display: block;
+        }
+      }
     </style>
   </head>
   <body class="bg-gradient-to-b from-bg-secondary to-[#07182a] text-[#e6eef6] font-sans antialiased">
